@@ -4,7 +4,7 @@
 
 use oxa_cli::{
     clean_notes, identity_facts, parse_draft, process_runner, report_repo, run_identity, save_draft, scrub,
-    submit, write_identity, ScrubCtx, MAX_NOTES_CHARS, REPORT_DISABLED,
+    submit, write_identity, RunFacts, ScrubCtx, MAX_NOTES_CHARS, REPORT_DISABLED,
 };
 use oxa_config::{Dirs, Env, Settings};
 use oxa_fake::TestEnv;
@@ -138,51 +138,102 @@ fn notes_lose_transcript_records_and_are_capped() {
 // Drafts
 
 #[test]
-fn draft_collects_a_scrubbed_digest_and_posts_nothing() {
+fn draft_names_only_the_session_model_and_runs_no_controller_cli() {
     let env = TestEnv::new();
     let dirs = Dirs::under(env.root());
-    env.write(
-        "home/.oxa/agent/identity.md",
-        "oxa is the coding agent of ox-llm.\n\n- oxa version: 0.2.0\n- Machine: Test Laptop, Snapdragon X Elite (X1E80100)\n- System: Omarchy Linux\n",
+    // The installed identity lists 31 models (30 cloud, one local), as a real install does,
+    // and this machine has no `oxc` at all: a Rust-only install (#1553).
+    let mut identity = String::from(
+        "oxa is the coding agent of ox-llm.\n\n\
+- oxa version: 0.2.0\n\
+- Machine: Test Laptop, Snapdragon X Elite (X1E80100)\n\
+- System: Omarchy Linux\n\
+- Models (one is loaded at a time; switching reloads the engine and reads the whole conversation again):\n",
     );
-    let mut calls: Vec<(String, Vec<String>)> = Vec::new();
-    let mut runner = |program: &str, args: &[String]| -> Option<(i32, String)> {
-        calls.push((program.to_string(), args.to_vec()));
-        None
-    };
+    for i in 1..=30 {
+        identity.push_str(&format!(
+            "  - opencode/cloud-model-{i}: context {} tokens, output up to {} tokens\n",
+            100_000 + i,
+            1_000 + i
+        ));
+    }
+    identity.push_str("  - moe: context 131072 tokens, output up to 8192 tokens\n");
+    env.write("home/.oxa/agent/identity.md", &identity);
+    let vars = Env::from_pairs(&[("OXA_MODEL", "opencode/cloud-model-7")]);
+    let facts = RunFacts::new(&dirs, &vars, &Settings::default());
     let (path, title, body) = save_draft(
         "Flash stalls for carol",
         "Flash stalls at /srv/users/carol/proj after switching; mail me at carol@example.com",
         &dirs,
         &ctx(),
-        &mut runner,
+        &facts,
     )
     .expect("draft");
     assert!(path.starts_with(dirs.agent_dir.join("issue-drafts")));
     assert_eq!(title, "Flash stalls for <user>");
     let saved = std::fs::read_to_string(&path).unwrap();
     assert_eq!(parse_draft(&saved), Some((title.clone(), body.clone())));
-    for gone in ["carol", "example.com", "/srv/users"] {
+    for gone in [
+        "carol",
+        "example.com",
+        "/srv/users",
+        // No controller CLI and no controller/digest sections any more.
+        "controller",
+        "Controller",
+        "did not answer",
+        "Health digest",
+        // No controller or other program runs during a draft (#1553): the facts are read
+        // in-process, so the controller CLIs never appear in the body either.
+        "oxc",
+        "local-ai",
+        // The catalog is no longer dumped: only the session's model is named.
+        "one is loaded at a time",
+        "cloud-model-1:",
+        "cloud-model-8",
+        "moe",
+    ] {
         assert!(!body.contains(gone), "{gone:?} in the draft:\n{body}");
     }
-    for kept in ["## What happened", "~/proj", "<email>", "Snapdragon X Elite"] {
+    assert_eq!(body.matches("cloud-model").count(), 1, "{body}");
+    for kept in [
+        "## What happened",
+        "~/proj",
+        "<email>",
+        "Snapdragon X Elite",
+        "- model: opencode/cloud-model-7",
+        "- provider: opencode",
+        "- context: 100007 tokens",
+        "- output: up to 1007 tokens",
+        "- engine: endpoint `oxe`",
+        "- offline: no",
+    ] {
         assert!(body.contains(kept), "{kept:?} missing:\n{body}");
     }
-    assert!(calls.is_empty(), "no controller or other program ran: {calls:?}");
-    for gone in ["Controller status", "controller CLI", "oxc", "local-ai"] {
-        assert!(!body.contains(gone), "{gone:?} in the draft:\n{body}");
-    }
-    assert!(!calls.iter().any(|(p, _)| p == "gh"));
+}
+
+#[test]
+fn a_draft_without_a_session_model_names_no_model_and_keeps_the_catalog_out() {
+    let env = TestEnv::new();
+    let dirs = Dirs::under(env.root());
+    env.write(
+        "home/.oxa/agent/identity.md",
+        "oxa is the coding agent of ox-llm.\n\n- oxa version: 0.2.0\n- Models: unknown\n",
+    );
+    let facts = RunFacts::new(&dirs, &Env::from_pairs(&[]), &Settings::default());
+    let (_, _, body) = save_draft("Engine stalls", "It stalls.", &dirs, &ctx(), &facts).expect("draft");
+    assert!(!body.contains("- model:"), "{body}");
+    assert!(body.contains("- engine: endpoint `oxe`"), "{body}");
+    assert!(body.contains("## Session"), "{body}");
 }
 
 #[test]
 fn a_draft_without_a_description_is_refused() {
     let env = TestEnv::new();
     let dirs = Dirs::under(env.root());
-    let mut runner = |_: &str, _: &[String]| None;
+    let facts = RunFacts::new(&dirs, &Env::from_pairs(&[]), &Settings::default());
     // Empty notes, blank notes, and notes that are only transcript records all leave nothing to report.
     for notes in ["", "  \n ", "{\"role\":\"user\",\"content\":\"x\"}"] {
-        let err = save_draft("Report with no findings", notes, &dirs, &ctx(), &mut runner)
+        let err = save_draft("Report with no findings", notes, &dirs, &ctx(), &facts)
             .expect_err("an empty report must not be drafted");
         assert!(err.to_string().contains("no description"), "{err}");
     }

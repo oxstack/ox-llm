@@ -1,6 +1,6 @@
 ---
 name: report-issue
-description: Draft a bug report for the public ox-llm repository from a scrubbed system digest (no email, no home paths, no prompts or transcripts, no secrets). Shows the user the exact title and body and posts only after the user confirms in their own terminal. Use when the user wants to report a problem with ox-llm, oxa or the engine.
+description: Draft a bug report for the public ox-llm repository from scrubbed system and session facts (no email, no home paths, no prompts or transcripts, no secrets). Shows the user the exact title and body and posts only after the user confirms in their own terminal. Use when the user wants to report a problem with ox-llm, oxa or the engine.
 ---
 
 # Report an ox-llm issue
@@ -16,9 +16,10 @@ under the home directory, names, emails, keys or tokens into a report.
    oxa report-issue draft --title "TITLE" --notes-file NOTES.txt
    ```
 
-   The command collects a scrubbed digest (oxa version, machine, OS, models, the controller's
-   status and health digest), scrubs the notes too, saves the draft and prints the draft path
-   followed by the exact title and body.
+   The command collects scrubbed facts (oxa version, machine, OS, and the drafting session's
+   model with its limits and engine state, read in-process: no controller CLI is run), scrubs
+   the notes too, saves the draft and prints the draft path followed by the exact title and
+   body.
 
    Title the report with the symptom and the component, without prefixes (no "Bug:", no
    "[oxa]") that make every report look alike.

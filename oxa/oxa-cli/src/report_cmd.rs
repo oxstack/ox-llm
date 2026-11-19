@@ -1,16 +1,18 @@
 //! O-152: `oxa report-issue` (architect-owned), the code behind the built-in `report-issue`
-//! skill. `draft` collects a scrubbed digest and saves a draft; `submit` shows the exact text
+//! skill. `draft` collects scrubbed facts and saves a draft; `submit` shows the exact text
 //! and posts it with `gh issue create` only after the user typed `yes` on the controlling
 //! terminal. Reporting is off until `oxa.reportIssue.repo` names the public repository.
 //!
 //! What a draft may contain: the user's description (scrubbed, capped, no transcript records),
-//! the identity facts (version, machine, OS, models). No controller is called. Never prompts, transcripts, file contents,
-//! emails, home paths, user or host names, IP addresses or secrets.
+//! the identity facts (version, machine, OS) and the session's own model with its limits and
+//! the engine selection (#1553). Every fact is read in-process: a draft never runs a
+//! controller CLI (`oxc`, `local-ai`) and never makes a request. Never prompts, transcripts,
+//! file contents, emails, home paths, user or host names, IP addresses or secrets.
 mod pushed;
 mod semantic;
 pub(crate) use pushed::PushScan;
 
-use oxa_config::{Dirs, Env, Settings};
+use oxa_config::{Dirs, Env, ModelsConfig, Settings};
 use oxa_proto::{codes, OxaError};
 use oxa_resources::{read_identity, write_atomic};
 use regex::Regex;
@@ -33,7 +35,7 @@ Nothing was posted. The draft stays where it is; you can file it by hand, or set
 
 /// The longest user description kept in a draft (characters).
 pub const MAX_NOTES_CHARS: usize = 2000;
-/// The longest controller output kept per section (characters).
+/// The longest section kept in a draft or in the semantic judge's input (characters).
 pub const MAX_SECTION_CHARS: usize = 4000;
 
 /// Runs a program: `(program, args)` -> `Some((exit code, stdout))`, `None` when it could not
@@ -196,6 +198,49 @@ pub fn clean_notes(notes: &str, ctx: &ScrubCtx) -> String {
     scrub(&text, ctx)
 }
 
+/// What the draft says about this run: the model of the session that drafted it and the
+/// engine selection. Every fact is read in-process (#1553): a draft never runs a controller
+/// CLI and never makes a request, so a Rust-only install drafts the same report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunFacts {
+    /// `OXA_MODEL`: the session's model, the only model a draft names. `None` when the draft
+    /// was not made from a session (there is then no model to report).
+    pub model: Option<String>,
+    /// The default endpoint's name (`oxe`), the provider of a model id without a prefix.
+    pub endpoint: String,
+    /// How this run reaches its models, from the user-only `oxa.engine.*` selection.
+    pub engine: String,
+    /// The process's hard offline switch (`OXA_OFFLINE`, `--offline`, `oxa.offline`).
+    pub offline: bool,
+}
+
+impl RunFacts {
+    /// The facts of this process: `OXA_MODEL` from the environment and the engine selection
+    /// from the user settings (a project file cannot choose it). No I/O beyond reading the
+    /// settings and models files.
+    pub fn new(dirs: &Dirs, env: &Env, settings: &Settings) -> RunFacts {
+        let (models, _) = ModelsConfig::load(dirs, env);
+        let cloud = settings.bool(crate::in_process::SETTING, false);
+        let local = settings.bool(oxc_local::LOCAL_SETTING, false);
+        let engine = match (cloud, local) {
+            (true, true) => "in-process cloud gateway and local engine".to_string(),
+            (true, false) => "in-process cloud gateway".to_string(),
+            (false, true) => "in-process local engine".to_string(),
+            (false, false) => format!("endpoint `{}`", models.default),
+        };
+        RunFacts {
+            model: env
+                .get("OXA_MODEL")
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .map(str::to_string),
+            endpoint: models.default,
+            engine,
+            offline: oxa_proto::offline(),
+        }
+    }
+}
+
 fn cap(text: &str) -> String {
     if text.chars().count() <= MAX_SECTION_CHARS {
         text.to_string()
@@ -204,23 +249,90 @@ fn cap(text: &str) -> String {
     }
 }
 
-/// The body of an issue: the description and the identity facts. Every part is scrubbed.
-pub fn draft_body(notes: &str, dirs: &Dirs, ctx: &ScrubCtx, _runner: Runner<'_>) -> String {
+/// The context and output limits a model has in the installed identity's model list, which
+/// `oxa identity --refresh` wrote from the engine. `(None, None)` when the model is not listed.
+fn identity_limits(identity: &str, model: &str) -> (Option<u32>, Option<u32>) {
+    let number = |limits: &str, label: &str| {
+        limits
+            .split_once(label)?
+            .1
+            .split_whitespace()
+            .next()?
+            .parse::<u32>()
+            .ok()
+    };
+    for line in identity.lines() {
+        let Some(entry) = line.trim_start().strip_prefix("- ") else {
+            continue;
+        };
+        let (name, limits) = match entry.split_once(": ") {
+            Some((name, limits)) => (name, limits),
+            None => (entry, ""),
+        };
+        if name != model {
+            continue;
+        }
+        return (number(limits, "context "), number(limits, "output up to "));
+    }
+    (None, None)
+}
+
+/// The provider of a model id, as the model list's provider column names it: the id's prefix
+/// (`<provider>/<name>`), else the default endpoint (`oxe`) when the id has none.
+fn model_provider(model: &str, endpoint: &str) -> String {
+    model
+        .split_once('/')
+        .filter(|(provider, name)| !provider.is_empty() && !name.is_empty())
+        .map_or_else(|| endpoint.to_string(), |(provider, _)| provider.to_string())
+}
+
+/// The session section: the session's model with its provider and limits (when known), then
+/// the engine selection and the offline switch.
+fn session_section(facts: &RunFacts, identity: Option<&str>) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    if let Some(model) = facts.model.as_deref() {
+        lines.push(format!("- model: {model}"));
+        lines.push(format!("- provider: {}", model_provider(model, &facts.endpoint)));
+        let (context, max_output) = identity
+            .map(|identity| identity_limits(identity, model))
+            .unwrap_or((None, None));
+        if let Some(tokens) = context {
+            lines.push(format!("- context: {tokens} tokens"));
+        }
+        if let Some(tokens) = max_output {
+            lines.push(format!("- output: up to {tokens} tokens"));
+        }
+    }
+    lines.push(format!("- engine: {}", facts.engine));
+    lines.push(format!("- offline: {}", if facts.offline { "yes" } else { "no" }));
+    lines.join("\n")
+}
+
+/// The body of an issue: the description, the identity facts and this session's model and
+/// engine state. Every part is scrubbed.
+pub fn draft_body(notes: &str, dirs: &Dirs, ctx: &ScrubCtx, facts: &RunFacts) -> String {
     let mut parts: Vec<String> = Vec::new();
     let notes = clean_notes(notes, ctx);
     parts.push(format!("## What happened\n\n{}", notes));
+    let identity = read_identity(dirs);
     let mut system: Vec<String> = vec![format!("- oxa version: {}", env!("CARGO_PKG_VERSION"))];
-    if let Some(identity) = read_identity(dirs) {
+    if let Some(identity) = identity.as_deref() {
         system.extend(
             identity
                 .lines()
-                .filter(|l| (l.starts_with("- ") || l.starts_with("  - ")) && !l.starts_with("- oxa version"))
+                .filter(|l| {
+                    l.starts_with("- ") && !l.starts_with("- oxa version") && !l.starts_with("- Models")
+                })
                 .map(str::to_string),
         );
     } else {
         system.push("- identity: not installed".to_string());
     }
     parts.push(format!("## System\n\n{}", scrub(&system.join("\n"), ctx)));
+    parts.push(format!(
+        "## Session\n\n{}",
+        scrub(&session_section(facts, identity.as_deref()), ctx)
+    ));
     parts.push(
         "Drafted by `oxa report-issue`: scrubbed of emails, home paths, user and host names, IP addresses and secrets; no prompts or transcripts."
             .to_string(),
@@ -248,7 +360,7 @@ pub fn save_draft(
     notes: &str,
     dirs: &Dirs,
     ctx: &ScrubCtx,
-    runner: Runner<'_>,
+    facts: &RunFacts,
 ) -> Result<(PathBuf, String, String), OxaError> {
     let title = scrub(title.trim(), ctx).replace('\n', " ");
     if title.is_empty() {
@@ -261,7 +373,7 @@ pub fn save_draft(
         )
         .with_hint(USAGE));
     }
-    let body = draft_body(notes, dirs, ctx, runner);
+    let body = draft_body(notes, dirs, ctx, facts);
     let text = draft_text(&title, &body);
     let hash = Sha256::digest(text.as_bytes());
     let name: String = hash.iter().take(6).map(|b| format!("{b:02x}")).collect();
@@ -555,7 +667,8 @@ pub fn run_report_issue(
                 i += 2;
             }
             let title = title.ok_or_else(|| usage("a title is required (--title)"))?;
-            let (path, title, body) = save_draft(&title, &notes, dirs, &ctx, &mut runner)?;
+            let facts = RunFacts::new(dirs, env, &Settings::load(dirs, cwd, false));
+            let (path, title, body) = save_draft(&title, &notes, dirs, &ctx, &facts)?;
             let w = |e: std::io::Error| OxaError::io("cannot write the draft", &e);
             writeln!(out, "Draft: {}\n\nTitle: {title}\n\n{body}\n", path.display()).map_err(w)?;
             writeln!(
@@ -609,5 +722,59 @@ pub fn run_report_issue(
             )
         }
         _ => Err(usage("report-issue needs `draft` or `submit`")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxa_fake::TestEnv;
+    use serde_json::json;
+
+    #[test]
+    fn identity_limits_read_the_installed_model_list() {
+        let identity = "- Models (one is loaded at a time):\n  - moe: context 131072 tokens, output up to 8192 tokens\n  - opencode/big: context 1000000 tokens, output up to 384000 tokens\n  - bare\n";
+        assert_eq!(identity_limits(identity, "moe"), (Some(131_072), Some(8_192)));
+        assert_eq!(
+            identity_limits(identity, "opencode/big"),
+            (Some(1_000_000), Some(384_000))
+        );
+        assert_eq!(identity_limits(identity, "bare"), (None, None));
+        assert_eq!(identity_limits(identity, "absent"), (None, None));
+    }
+
+    #[test]
+    fn the_provider_is_the_id_prefix_else_the_endpoint() {
+        assert_eq!(model_provider("opencode/deepseek", "oxe"), "opencode");
+        assert_eq!(model_provider("moe", "oxe"), "oxe");
+        assert_eq!(model_provider("openrouter/vendor/name", "oxe"), "openrouter");
+    }
+
+    #[test]
+    fn the_engine_word_follows_the_user_selection() {
+        let env = TestEnv::new();
+        let dirs = Dirs::under(env.root());
+        let vars = Env::from_pairs(&[]);
+        let cases = [
+            (Settings::default(), "endpoint `oxe`"),
+            (
+                Settings::from_values(json!({"oxa": {"engine": {"inProcessCloud": true}}}), json!({})),
+                "in-process cloud gateway",
+            ),
+            (
+                Settings::from_values(json!({"oxa": {"engine": {"inProcessLocal": true}}}), json!({})),
+                "in-process local engine",
+            ),
+            (
+                Settings::from_values(
+                    json!({"oxa": {"engine": {"inProcessCloud": true, "inProcessLocal": true}}}),
+                    json!({}),
+                ),
+                "in-process cloud gateway and local engine",
+            ),
+        ];
+        for (settings, word) in cases {
+            assert_eq!(RunFacts::new(&dirs, &vars, &settings).engine, word);
+        }
     }
 }

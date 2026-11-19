@@ -1,7 +1,9 @@
 //! The report-issue workflow for an explicit user-launched --report-problems run.
 //! Normal `report-issue submit` retains its controlling-terminal confirmation.
-use crate::report_cmd::{self, clean_notes, report_repo, save_draft, scrub, Confirm, Runner, ScrubCtx};
-use oxa_config::{Dirs, Settings};
+use crate::report_cmd::{
+    self, clean_notes, report_repo, save_draft, scrub, Confirm, RunFacts, Runner, ScrubCtx,
+};
+use oxa_config::{Dirs, Env, Settings};
 use oxa_work::{ProblemNote, Record, ReportRecord};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -132,8 +134,9 @@ pub(crate) fn report_semantic(
     let task = format!("{:x}", key.finalize());
     let occurrence = format!("Task: {task}\nWorker: oxa-work\nRun: {run}\n{notes}");
     with_report_lease(dirs, run_command, |runner| {
+        let facts = RunFacts::new(dirs, &Env::from_pairs(&[]), settings);
         let (draft, _, _) =
-            save_draft(&title, &occurrence, dirs, ctx, runner).map_err(|err| err.to_string())?;
+            save_draft(&title, &occurrence, dirs, ctx, &facts).map_err(|err| err.to_string())?;
         let submission = report_cmd::submit_record(
             &draft,
             &report_cmd::report_ledger(dirs),
@@ -187,8 +190,9 @@ fn report_legacy(
         notes: visible(&note.notes),
         keywords: note.keywords.iter().map(|query| visible(query)).collect(),
     };
+    let facts = RunFacts::new(dirs, &Env::from_pairs(&[]), settings);
     let (draft, title, body) =
-        save_draft(&note.title, &note.notes, dirs, ctx, runner).map_err(|e| e.to_string())?;
+        save_draft(&note.title, &note.notes, dirs, ctx, &facts).map_err(|e| e.to_string())?;
     let mut result = ReportRecord {
         disposition: "local".into(),
         draft,

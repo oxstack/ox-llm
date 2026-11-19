@@ -43,7 +43,7 @@ oxa ships four skills. They appear in the list whether or not their files have b
 |---|---|
 | `ox-llm` | operating the ox-llm platform that runs the agent: the available models, usage and spend, session status, the `oxe` engine, logs and troubleshooting with the `oxa` CLI |
 | `pull-request` | the pull-request workflow: branch and commit identity, opening a draft PR with a verified body, following up on reviews (the review text supplied with the task first, `gh` only where the session may use it, and a plain statement when neither source gave it), and the rules (no push to a queued PR, no force-push, no merging unless told) |
-| `report-issue` | drafting an issue for the ox-llm repository from a scrubbed system digest. The draft is shown to you, and it is posted only when you confirm in your terminal. Reporting is off until `oxa.reportIssue.repo` is set |
+| `report-issue` | drafting an issue for the ox-llm repository from scrubbed system and session facts. The draft is shown to you, and it is posted only when you confirm in your terminal. Reporting is off until `oxa.reportIssue.repo` is set |
 | `oxa-extend` | how to extend oxa: skills, prompt templates, extensions and exec hooks, where each file goes, and how to keep the cache warm |
 
 ## Prompt templates

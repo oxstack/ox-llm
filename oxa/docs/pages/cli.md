@@ -137,7 +137,7 @@ Metered cloud aliases need `oxa.engine.inProcessCloud`, a configured price, and 
 
 `oxa update --self`, `--all` and `--models` report that they are not supported: oxa does not update itself and does not refresh model catalogues. Update oxa by installing a new build.
 
-`oxa report-issue draft` takes `--title <text>` (required), and the notes either inline with `--notes <text>` or from a file with `--notes-file <path>` (relative paths are taken from the current directory). It writes the draft under `issue-drafts/` in the agent directory and prints its path; it posts nothing. `oxa report-issue submit <draft>` posts it after you type `yes`.
+`oxa report-issue draft` takes `--title <text>` (required), and the notes either inline with `--notes <text>` or from a file with `--notes-file <path>` (relative paths are taken from the current directory). It writes the draft under `issue-drafts/` in the agent directory and prints its path; it posts nothing. The body holds the scrubbed description, the identity facts (oxa version, machine, OS) and one session section: the drafting session's model with its provider and limits, the engine selection and whether offline is on. All of it is read in-process; no controller CLI is run and no request is made, and a report made outside a session names no model. `oxa report-issue submit <draft>` posts it after you type `yes`.
 
 `oxa config` lists the settings as oxa resolves them.
 
