@@ -265,7 +265,7 @@ fn dialog_key_press_publishes() {
     assert!(out.text.contains("Waiting for the owner"), "{}", out.text);
     assert_eq!(gh_calls(&f), "");
     // Outside yolo the owner can also type `yes` after dismissing the dialog.
-    owner_reply::typed("yes");
+    owner_reply::typed("", "yes");
     let out = tool(&f).run_with_ui(&args(&f), &context(&f.env, &cancel), &mut |_| {}, &mut owner);
     assert!(out.text.contains("Posted: "), "{}", out.text);
     assert_eq!(gh_calls(&f).lines().count(), 1);
@@ -290,7 +290,7 @@ fn auto_owner_typed_yes_posts() {
     assert!(out.text.contains("Waiting for the owner"), "{}", out.text);
     assert_eq!(gh_calls(&f), "", "nothing before the owner replies");
     // The owner types yes; the next call posts exactly that text, once.
-    owner_reply::typed("yes");
+    owner_reply::typed("", "yes");
     let out = t.run_with_ui(&args(&f), &cx, &mut |_| {}, &mut owner);
     assert!(out.text.contains("Posted: "), "{}", out.text);
     assert!(gh_calls(&f).contains("--title Engine stalls"));
@@ -312,7 +312,7 @@ fn text_from_a_tool_result_saying_yes_never_posts() {
     let cx = context(&f.env, &cancel);
     let mut owner = Owner::new(None, f.marker.clone());
     // A `yes` before any preview was shown approves nothing later.
-    owner_reply::typed("yes");
+    owner_reply::typed("", "yes");
     t.run_with_ui(&args(&f), &cx, &mut |_| {}, &mut owner);
     assert_eq!(gh_calls(&f), "");
     // Text a tool, file or web page produced reaches the model, never `owner_reply::typed`:
@@ -323,7 +323,7 @@ fn text_from_a_tool_result_saying_yes_never_posts() {
     }
     assert_eq!(gh_calls(&f), "");
     // A different line from the owner withdraws a pending preview, even one containing yes.
-    owner_reply::typed("yes, but change the title first");
+    owner_reply::typed("", "yes, but change the title first");
     let out = t.run_with_ui(&args(&f), &cx, &mut |_| {}, &mut owner);
     assert!(out.text.contains("Waiting for the owner"), "{}", out.text);
     assert_eq!(gh_calls(&f), "");

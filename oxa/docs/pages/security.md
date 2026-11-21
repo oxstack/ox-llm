@@ -57,6 +57,12 @@ Pasted and dropped images saved as `tmp/paste-<hash>.<image extension>` remain r
 - The auto-approved count records questions answered with allow, once each. A denial bypassed by full access is not an approval and does not increment it (#443).
 - Plan mode and project trust work the same in every mode.
 
+### Approval views
+
+A dangerous-command question can be saved for the session or always. A session grant ends with the run. An always grant is the exact `<rule> <command>` key in your user settings (`oxa.approval.always`), merged under the settings write lock so two sessions saving at once keep each other's keys.
+
+Every view of the command (the terminal dialog, the lead page, `oxa approve`) shows what will run. It masks named assignments (`token=...`), flag operands (`--password x`), credentials in URLs and literals inside `${NAME:-...}` expansions, and it never masks executable text: commands, `$(...)` bodies and expansion names stay visible. The dialog shows each shell line as its own line. A long command or publication text is shown a page at a time (`pageup`/`pagedown`), and a page is only as tall as your terminal; paging is optional, Deny stays the default and answers right away, and an allow choice is available from any page. A `yes` you type for a publication answers only that session and the exact text it showed, once, and it is not withdrawn when you switch session.
+
 A direct shell script-file command such as `sh scripts/git-push.sh` follows the usual permissions for the mode. The publish check does not treat the script filename as inline `git push` text or inspect the file. Inline commands, mixed lines with an explicit publish command, and dangerous-command checks still follow their own rules.
 
 ### Owner yes

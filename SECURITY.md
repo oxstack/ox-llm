@@ -31,6 +31,14 @@ boundary: a command that slips past them by obfuscation is P3. A saved unattende
 pipeline fed by anything but a literal `echo`/`printf`, or an input redirect. A `wait` probe that runs `gh`
 is network access (plan denies, ask asks once per session).
 
+A dangerous-command approval can be saved for the session or always. A session grant ends with the
+run; an always grant is the exact `<rule> <command>` key in the owner's user settings, written under
+the settings write lock. The approval views (dialog, lead page, `oxa approve`) show what runs: named
+assignments (`token=`), flag operands (`--password x`), URL credentials and literals inside parameter
+expansions are masked; executable text (commands, `$(...)`, `${NAME:-` heads) is never masked. A typed
+`yes` for a publication is bound to the session and the exact text that was shown (its digest, single
+use) and is not withdrawn when the session changes.
+
 A desk grant (once or session) of a pushing command in an unattended run is bound to resolved facts:
 the source ref object ids and a digest of origin's URLs (never the URLs), re-read at every decision
 immediately before the run, plus the run and session. After a commit, a reset or `git remote set-url`

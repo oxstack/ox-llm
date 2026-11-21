@@ -15,9 +15,9 @@ use std::sync::mpsc::{channel, Sender};
 
 /// Rows a choice list shows before it scrolls.
 const MAX_VISIBLE: usize = 10;
-/// Publication previews are deliberately bounded independently of terminal height. Page keys
-/// expose every row, and approval remains disabled until the final page has been viewed.
-const PUBLICATION_ROWS: usize = 10;
+/// The most preview rows a page shows. A short terminal shows fewer (see
+/// [`DialogHost::render_in`]); page keys move through the rest of the preview.
+const PREVIEW_ROWS: usize = 10;
 /// The permission prompt's choices, in display order. Deny is the default focus so that a
 /// stray Enter never grants access.
 const ACCESS_LABELS: [&str; 3] = ["Allow once", "Allow for this session", "Deny"];
@@ -37,6 +37,9 @@ pub const DANGER_ANSWERS: [DangerAnswer; 4] = [
     DangerAnswer::Deny,
 ];
 const HINT_CHOICE: &str = "up/down move  enter choose  esc cancel";
+/// Dialog rows a fullscreen choice dialog spends around the preview page: the two frame
+/// borders and the blank and hint rows. The choices and the row counter are counted apart.
+const CHROME_ROWS: usize = 5;
 const HINT_TEXT: &str = "enter submit  esc cancel";
 
 /// The `oxa_proto::Ui` handed to `Session::prompt` on the worker thread: every call becomes a
@@ -409,7 +412,13 @@ impl DialogHost {
             } => {
                 // The command and the reasons come from the model: strip escape sequences and
                 // other control characters so they cannot rewrite the dialog around them.
-                let mut lines = vec![sanitize_dialog_text(&access_prompt(&access).1)];
+                // Each shell line is its own dialog line, so a second command on a new line is visibly
+                // a second line (#1772).
+                let mut lines: Vec<String> = access_prompt(&access)
+                    .1
+                    .split('\n')
+                    .map(sanitize_dialog_text)
+                    .collect();
                 lines.extend(reasons.iter().map(|r| format!("- {}", sanitize_dialog_text(r))));
                 let mut list = choice_list(&DANGER_LABELS);
                 // Deny is focused by default: a stray Enter never runs a dangerous command.
@@ -552,8 +561,17 @@ impl DialogHost {
         changed
     }
 
-    /// Lines of the open dialog (empty when none).
+    /// Lines of the open dialog (empty when none), without a viewport bound.
     pub fn render(&mut self, width: u16, theme: &Theme) -> Vec<String> {
+        self.render_in(width, None, theme)
+    }
+
+    /// Lines of the open dialog (empty when none) when the terminal has `height` rows for it.
+    ///
+    /// The fullscreen layout keeps only the last terminal rows, so a dialog taller than the
+    /// screen loses its head. A paged preview sizes its page to the rows the terminal can
+    /// actually show; page keys move through the rest of it.
+    pub fn render_in(&mut self, width: u16, height: Option<usize>, theme: &Theme) -> Vec<String> {
         self.cursor_at = None;
         let clock = self.clock;
         let Some(dialog) = self.open.as_mut() else {
@@ -568,36 +586,65 @@ impl DialogHost {
         let mut header = Some(title.clone());
         let mut body: Vec<String> = Vec::new();
         let mut cursor: Option<(usize, u16)> = None;
+        // A preview on a terminal too short for the comfortable chrome drops its blank
+        // separators, its row counter and, at the smallest sizes, its frame and hint. The
+        // command and the choices stay on screen.
+        let mut compact = false;
+        let mut show_hint = true;
+        let mut unframed = false;
+        // Dialog rows the terminal can show: its height, or none for an unbounded draw.
+        let available = height.map(|h| h.max(1));
         match &mut dialog.body {
             Body::Choice {
                 lines,
                 list,
                 kind,
                 scroll,
-                reviewed,
+                page,
             } => {
+                // The choices are drawn below the preview; their row count bounds its page.
+                let choices = list.render(inner, theme);
                 match kind {
                     // A select has no body text: its title is the question, wrapped.
                     ChoiceKind::Select => {
                         header = None;
                         body.extend(wrap(&title, inner as usize));
                     }
-                    // Publication text is shown as it will be published: no word re-flow.
-                    ChoiceKind::Approve => {
+                    // Publication and command text is shown exactly as it will be published
+                    // or run: no word re-flow. Page keys move through the rest of it.
+                    ChoiceKind::Approve | ChoiceKind::Danger => {
                         let mut preview = Vec::new();
                         for line in lines.iter() {
                             preview.extend(hard_wrap(line, inner as usize));
                         }
-                        let max_scroll = preview.len().saturating_sub(PUBLICATION_ROWS);
+                        // A page is at most the preview's cap and never more than the rows the
+                        // terminal has left once the list, the hint, the frame and the row
+                        // counter are drawn. A terminal too short for that layout keeps one
+                        // command row plus the choices: it drops the blanks and the counter,
+                        // then the hint, then the frame, so the command never falls off the top
+                        // while the choices stay visible.
+                        let choices_rows = choices.len();
+                        let full_fixed = CHROME_ROWS + choices_rows + 1;
+                        compact = available.is_some_and(|h| h < full_fixed + 1);
+                        let fixed = if compact {
+                            let chrome = 2 + choices_rows;
+                            unframed = available.is_some_and(|h| h < chrome + 1);
+                            show_hint = available.is_some_and(|h| h >= chrome + 2);
+                            (if unframed { choices_rows } else { chrome }) + usize::from(show_hint)
+                        } else {
+                            full_fixed
+                        };
+                        let cap = available.map_or(PREVIEW_ROWS, |h| h.saturating_sub(fixed));
+                        *page = cap.clamp(1, PREVIEW_ROWS);
+                        let max_scroll = preview.len().saturating_sub(*page);
                         *scroll = (*scroll).min(max_scroll);
-                        let end = (*scroll + PUBLICATION_ROWS).min(preview.len());
+                        let end = (*scroll + *page).min(preview.len());
                         body.extend(preview[*scroll..end].iter().cloned());
-                        *reviewed |= end == preview.len();
-                        if preview.len() > PUBLICATION_ROWS {
+                        if !compact && preview.len() > *page {
                             body.push(theme.fg(
                                 "muted",
                                 &format!(
-                                    "rows {}–{} of {}  pageup/pagedown review",
+                                    "rows {}–{} of {}  pageup/pagedown",
                                     *scroll + 1,
                                     end,
                                     preview.len()
@@ -611,10 +658,16 @@ impl DialogHost {
                         }
                     }
                 }
-                body.push(String::new());
-                body.extend(list.render(inner, theme));
-                body.push(String::new());
-                body.push(theme.fg("muted", HINT_CHOICE));
+                if !compact {
+                    body.push(String::new());
+                }
+                body.extend(choices);
+                if !compact {
+                    body.push(String::new());
+                }
+                if show_hint {
+                    body.push(theme.fg("muted", HINT_CHOICE));
+                }
             }
             Body::Text { input } => {
                 let row = body.len();
@@ -643,6 +696,9 @@ impl DialogHost {
                 body = lines;
                 header = None;
             }
+        }
+        if unframed {
+            return body;
         }
         let framed = frame_lines(&body, width, header.as_deref(), "borderAccent", theme);
         self.cursor_at = cursor.map(|(row, col)| CursorPos {
@@ -958,6 +1014,8 @@ enum ChoiceKind {
     /// Publication approval: Approve is index 0, the exact text is shown unwrapped-by-words.
     Approve,
     Access,
+    /// Dangerous-command approval: Deny is the last choice; the command is paged for review
+    /// like a publication preview.
     Danger,
 }
 
@@ -980,10 +1038,10 @@ enum Body {
         lines: Vec<String>,
         list: Box<SelectList>,
         kind: ChoiceKind,
-        /// Wrapped-row offset for publication review.
+        /// Wrapped-row offset of the paged preview.
         scroll: usize,
-        /// Approval is enabled only after the owner has displayed the final preview page.
-        reviewed: bool,
+        /// Preview rows the last draw showed in one page.
+        page: usize,
     },
     Text {
         input: Input,
@@ -1030,7 +1088,7 @@ impl Dialog {
                 list: Box::new(list),
                 kind,
                 scroll: 0,
-                reviewed: false,
+                page: PREVIEW_ROWS,
             },
             reply,
             timeout_ms,
@@ -1063,32 +1121,21 @@ impl Dialog {
                 list,
                 kind,
                 scroll,
-                reviewed,
+                page,
                 ..
             } => {
-                if matches!(kind, ChoiceKind::Approve) && key.is("pagedown") {
-                    *scroll = scroll.saturating_add(PUBLICATION_ROWS);
+                if matches!(kind, ChoiceKind::Approve | ChoiceKind::Danger) && key.is("pagedown") {
+                    *scroll = scroll.saturating_add(*page);
                     return KeyFlow::Pending;
                 }
-                if matches!(kind, ChoiceKind::Approve) && key.is("pageup") {
-                    *scroll = scroll.saturating_sub(PUBLICATION_ROWS);
+                if matches!(kind, ChoiceKind::Approve | ChoiceKind::Danger) && key.is("pageup") {
+                    *scroll = scroll.saturating_sub(*page);
                     return KeyFlow::Pending;
                 }
                 match list.key(key, keymap) {
+                    // Denial is always available; approval needs no separate review.
                     SelectAction::Selected(value) => {
-                        let out = value.parse::<usize>().ok().and_then(|i| {
-                            // Denial is always available. Approval is not authority until the final
-                            // page has actually been rendered for review.
-                            if matches!(kind, ChoiceKind::Approve) && i == 0 && !*reviewed {
-                                None
-                            } else {
-                                Some(kind.outcome(i))
-                            }
-                        });
-                        if out.is_none() && matches!(kind, ChoiceKind::Approve) {
-                            return KeyFlow::Pending;
-                        }
-                        KeyFlow::Settle(out)
+                        KeyFlow::Settle(value.parse::<usize>().ok().map(|i| kind.outcome(i)))
                     }
                     SelectAction::Cancelled => KeyFlow::Settle(None),
                     SelectAction::Moved => KeyFlow::Pending,
@@ -1228,10 +1275,35 @@ mod approval_tests {
     }
 
     #[test]
-    fn publication_must_be_paged_to_the_end_before_approval() {
+    fn publication_approves_from_the_first_page() {
         let mut host = DialogHost::new();
+        let rx = open_publication(&mut host, 24);
+        let first = host.render(80, &Theme::plain()).join("\n");
+        assert!(first.contains("line 1") && !first.contains("line 24"), "{first}");
+        host.key(&Key::press("up"), &Keymap::defaults());
+        host.key(&Key::press("enter"), &Keymap::defaults());
+        assert_eq!(rx.recv().unwrap(), Some(true));
+    }
+
+    #[test]
+    fn publication_paging_shows_the_rest_without_gating_approval() {
+        let mut host = DialogHost::new();
+        let rx = open_publication(&mut host, 24);
+        host.render(80, &Theme::plain());
+        for _ in 0..3 {
+            host.key(&Key::press("pagedown"), &Keymap::defaults());
+            host.render(80, &Theme::plain());
+        }
+        let last = host.render(80, &Theme::plain()).join("\n");
+        assert!(last.contains("line 24") && !last.contains("│ line 1 "), "{last}");
+        host.key(&Key::press("up"), &Keymap::defaults());
+        host.key(&Key::press("enter"), &Keymap::defaults());
+        assert_eq!(rx.recv().unwrap(), Some(true));
+    }
+
+    fn open_publication(host: &mut DialogHost, lines: usize) -> std::sync::mpsc::Receiver<Option<bool>> {
         let (reply, rx) = channel();
-        let body = (1..=24)
+        let body = (1..=lines)
             .map(|n| format!("line {n}"))
             .collect::<Vec<_>>()
             .join("\n");
@@ -1244,17 +1316,6 @@ mod approval_tests {
             &mut ViewModel::default(),
             0,
         );
-        let first = host.render(80, &Theme::plain()).join("\n");
-        assert!(first.contains("line 1") && !first.contains("line 24"), "{first}");
-        host.key(&Key::press("up"), &Keymap::defaults());
-        host.key(&Key::press("enter"), &Keymap::defaults());
-        assert!(rx.try_recv().is_err(), "approval stayed disabled");
-
-        host.key(&Key::press("pagedown"), &Keymap::defaults());
-        host.key(&Key::press("pagedown"), &Keymap::defaults());
-        let last = host.render(80, &Theme::plain()).join("\n");
-        assert!(last.contains("line 24") && !last.contains("│ line 1 "), "{last}");
-        host.key(&Key::press("enter"), &Keymap::defaults());
-        assert_eq!(rx.recv().unwrap(), Some(true));
+        rx
     }
 }

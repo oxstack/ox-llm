@@ -74,6 +74,11 @@ const NO_EDITOR: &str = "No editor: set externalEditor, VISUAL or EDITOR";
 /// Most files indexed for `@` completion.
 const FILE_INDEX_MAX: usize = 5000;
 
+/// Rows the fullscreen footer below a dialog spends before any extension status line: the
+/// activity line, the HUD and the hint bar. A dialog bounds its preview page by what is left,
+/// so a row counted as reviewed is a row on screen; an over-estimate only shortens the page.
+const FULLSCREEN_FOOTER_ROWS: usize = 3;
+
 /// The selector shown in place of the editor.
 enum Overlay {
     Model(ModelSelector),
@@ -975,6 +980,8 @@ impl<'a> Loop<'a> {
     /// the new session from here on.
     fn rebind(&mut self, handle: Handle) {
         self.abort_requested = false;
+        // A typed publication `yes` stays bound to the request it answered: `rebind` does not
+        // withdraw it, and only that exact request id can consume it (never another request).
         // Join the old callback before draining its queue back into the editor.
         self.inbox = None;
         let old = std::mem::replace(&mut self.handle, handle);
@@ -1860,8 +1867,9 @@ impl<'a> Loop<'a> {
         if trimmed.is_empty() {
             return;
         }
-        // #1552: the line the owner typed is the one origin that can approve a publication.
-        oxa_proto::owner_reply::typed(&trimmed);
+        // #1552: the line the owner typed is the one origin that can approve a publication,
+        // and it acts only on its own session's request.
+        oxa_proto::owner_reply::typed(self.session.id.as_str(), &trimmed);
         if let Some(rest) = trimmed.strip_prefix('!') {
             let (excluded, cmd) = match rest.strip_prefix('!') {
                 Some(r) => (true, r),
@@ -2914,7 +2922,8 @@ impl<'a> Loop<'a> {
 
     /// Everything below the transcript: loader, widgets, the editor (or the open dialog or
     /// selector), the search bar and the footer. The cursor is relative to these lines.
-    fn bottom(&mut self, width: u16) -> (Vec<String>, Option<CursorPos>) {
+    /// `rows` is the terminal height when only its last rows stay visible (fullscreen).
+    fn bottom(&mut self, width: u16, rows: Option<usize>) -> (Vec<String>, Option<CursorPos>) {
         let mut lines: Vec<String> = Vec::new();
         // The loader line: a run in progress, or a run that waits for the user's answer.
         let status = if self.running() {
@@ -3060,7 +3069,26 @@ impl<'a> Loop<'a> {
         let outer = width;
         let width = if framed { frame_inner_width(outer) } else { outer };
         let (body, cursor) = if self.dialogs.is_open() {
-            let body = self.dialogs.render(width, &self.theme);
+            // Fullscreen keeps only the last terminal rows. Everything drawn below the dialog
+            // is counted first (the footer, an extension's own footer, widgets and the search
+            // bar), so the dialog pages inside the rows that are really left for it.
+            let below: usize =
+                self.vm.widgets_below.values().map(Vec::len).sum::<usize>() + usize::from(self.search_open);
+            let footer = match &self.vm.footer_override {
+                Some(lines) => lines.len(),
+                None => {
+                    let statuses = self
+                        .vm
+                        .status
+                        .ext_status
+                        .values()
+                        .filter(|text| !text.is_empty())
+                        .count();
+                    FULLSCREEN_FOOTER_ROWS + statuses
+                }
+            };
+            let height = rows.map(|r| r.saturating_sub(below + footer));
+            let body = self.dialogs.render_in(width, height, &self.theme);
             (body, self.dialogs.cursor())
         } else if let Some(ov) = self.overlay.as_mut() {
             let theme = &self.theme;
@@ -3223,7 +3251,9 @@ impl<'a> Loop<'a> {
         }
         let mut live = step.live;
         let top = live.len();
-        let (bottom, cursor) = self.bottom(width);
+        // The regular layout keeps the frame lines in the scrollback, so the dialog is not
+        // bounded to the terminal height here.
+        let (bottom, cursor) = self.bottom(width, None);
         live.extend(bottom);
         let cursor = cursor.map(|p| CursorPos {
             row: p.row + top,
@@ -3249,7 +3279,8 @@ impl<'a> Loop<'a> {
         let width = cols.max(1);
         let rows = rows as usize;
         self.reset_screen = false;
-        let (bottom, cursor) = self.bottom(width);
+        // Only the screen's rows survive here: the dialog pages within them.
+        let (bottom, cursor) = self.bottom(width, Some(rows));
         let bottom_rows = bottom.len().min(rows);
         let vp_rows = rows - bottom_rows;
         self.viewport.resize(width, vp_rows);
@@ -3566,17 +3597,28 @@ const APPROVAL_ALWAYS: &str = "oxa.approval.always";
 pub fn append_always(
     settings: &mut Settings,
     dirs: &Dirs,
-    cwd: &Path,
+    _cwd: &Path,
     keys: &[String],
 ) -> Result<(), OxaError> {
-    let mut list = Settings::load(dirs, cwd, false).list(APPROVAL_ALWAYS);
-    for key in keys {
-        if !list.contains(key) {
-            list.push(key.clone());
+    // Under the user file's write lock, merge into the list the FILE holds now: two sessions
+    // saving at once keep each other's keys (#1772).
+    settings.update_user(dirs, APPROVAL_ALWAYS, |current| {
+        let mut list: Vec<String> = current
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for key in keys {
+            if !list.contains(key) {
+                list.push(key.clone());
+            }
         }
-    }
-    let value = Value::Array(list.into_iter().map(Value::String).collect());
-    settings.set(dirs, cwd, APPROVAL_ALWAYS, value, false)
+        Ok(Value::Array(list.into_iter().map(Value::String).collect()))
+    })
 }
 
 /// The project trust question (D10 `ask_trust`'s question) drawn directly on `term`, for the

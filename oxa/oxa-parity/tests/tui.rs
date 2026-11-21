@@ -1649,6 +1649,190 @@ fn dangerous_command_asks_in_the_real_tui() {
     rig.pty.wait_for_text("refused as expected").unwrap();
 }
 
+/// #2165: a long dangerous command is paged in the real fullscreen TUI. The first page shows
+/// the command's head, pageup/pagedown move through the rest, paging is a view rather than a
+/// gate on the answer, and Deny answers immediately. Synthetic command: nothing dangerous is
+/// ever allowed to run.
+#[test]
+fn long_dangerous_command_pages_in_the_real_tui() {
+    // The dialog's own framed rows: the transcript's tool header also shows the command.
+    fn dialog_rows(s: &Screen) -> Vec<String> {
+        let rows = s.rows();
+        let start = rows
+            .iter()
+            .position(|r| r.contains("Dangerous command"))
+            .expect("the dialog title");
+        let end = rows
+            .iter()
+            .position(|r| r.contains("up/down move"))
+            .expect("the dialog hint");
+        rows[start..=end].to_vec()
+    }
+    let env = TestEnv::new();
+    let mut command = "rm -rf /srv/data".to_string();
+    for _ in 0..22 {
+        command.push_str("\n   ");
+    }
+    command.push_str("\necho tail-visible");
+    let script = vec![
+        ScriptTurn::tool("c1", "bash", &json!({ "command": command }).to_string()),
+        ScriptTurn::text("refused as expected"),
+    ];
+    let rig = Rig::start_in(env, script, RigOpts::default());
+    rig.pty.wait_for_text("ctrl+d exit").unwrap();
+    rig.type_text("push the branch");
+    rig.pty.send_key("enter");
+    let s = rig.pty.wait_for_text("Dangerous command").unwrap();
+    let requests_at_ask = rig.generating().len();
+    let shown = dialog_rows(&s).join("\n");
+    assert!(shown.contains("rm -rf /srv/data"), "{shown}");
+    assert!(!shown.contains("tail-visible"), "{shown}");
+    assert!(shown.contains("pageup/pagedown"), "{shown}");
+
+    // Two ups from Deny reach "Allow for this session"; the dialog stays open and the page
+    // view is unchanged, so focus moves without running anything.
+    rig.pty.send_key("up");
+    rig.pty.send_key("up");
+    let s = rig.pty.wait_for_text("→ Allow for this session").unwrap();
+    assert!(s.contains("Dangerous command"), "{s:?}");
+    assert!(!s.contains("refused as expected"), "{s:?}");
+    assert_eq!(
+        rig.generating().len(),
+        requests_at_ask,
+        "no new request: nothing ran"
+    );
+
+    // Page to the end: the benign tail becomes visible in the dialog itself. The bound is on
+    // the presses, not on a page count, so a page-size change cannot leave the test short.
+    for _ in 0..40 {
+        rig.pty.send_key("pagedown");
+    }
+    rig.pty
+        .wait_for_named(
+            "the last preview page",
+            |s| dialog_rows(s).iter().any(|r| r.contains("echo tail-visible")),
+            WAIT,
+        )
+        .unwrap();
+
+    // Deny still answers immediately; the model hears the refusal.
+    rig.pty.send_key("escape");
+    rig.pty.wait_for_text("the user declined this action").unwrap();
+    rig.pty.wait_for_text("refused as expected").unwrap();
+}
+
+/// #2165: a short fullscreen terminal pages a long dangerous command by the rows it can show.
+/// A ten-row page would push the dialog's head off the screen, so the page shrinks: the title,
+/// the choices and one page of rows stay visible; paging is optional and Deny answers at once.
+/// Synthetic command: nothing dangerous is ever allowed to run.
+#[test]
+fn short_terminal_dangerous_command_pages_visible_rows_in_the_real_tui() {
+    // The dialog's own framed rows: the transcript's tool header also shows the command.
+    fn dialog_rows(s: &Screen) -> Vec<String> {
+        let rows = s.rows();
+        let start = rows
+            .iter()
+            .position(|r| r.contains("Dangerous command"))
+            .expect("the dialog title");
+        let end = rows
+            .iter()
+            .position(|r| r.contains("up/down move"))
+            .expect("the dialog hint");
+        rows[start..=end].to_vec()
+    }
+    let env = TestEnv::new();
+    let mut command = "rm -rf /srv/data step-01".to_string();
+    for n in 2..=23 {
+        command.push_str(&format!("\nstep-{n:02}"));
+    }
+    command.push_str("\necho tail-visible step-24");
+    let script = vec![
+        ScriptTurn::tool("c1", "bash", &json!({ "command": command }).to_string()),
+        ScriptTurn::text("refused as expected"),
+    ];
+    let rig = Rig::start_in(
+        env,
+        script,
+        RigOpts {
+            size: (18, 100),
+            ..RigOpts::default()
+        },
+    );
+    rig.pty.wait_for_text("ctrl+d exit").unwrap();
+    rig.type_text("push the branch");
+    rig.pty.send_key("enter");
+    let s = rig.pty.wait_for_text("Dangerous command").unwrap();
+    let requests_at_ask = rig.generating().len();
+
+    // The dialog's head and foot are both on screen; a ten-row page would have cut the title.
+    let rows = s.rows();
+    let hint = rows
+        .iter()
+        .position(|r| r.contains("up/down move"))
+        .expect("the dialog hint");
+    assert!(
+        rows.get(hint + 1).is_some_and(|r| r.contains('╰')),
+        "the dialog's bottom edge is on screen: {s:?}"
+    );
+    let shown = dialog_rows(&s).join("\n");
+    assert!(shown.contains("step-01"), "{shown}");
+    for label in ["Allow once", "Deny"] {
+        assert!(shown.contains(label), "{label}\n{shown}");
+    }
+    // The page is smaller than a tall terminal's ten rows and names exactly the rows it shows.
+    // The counter's total is the command's rows plus any rule reason rows below them.
+    let page = dialog_rows(&s).iter().filter(|r| r.contains("step-")).count();
+    assert!(
+        (1..10).contains(&page),
+        "a short terminal shows {page} command rows: {shown}"
+    );
+    let total: usize = shown
+        .split(" of ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|total| total.parse().ok())
+        .expect("the row counter names every preview row");
+    assert!(
+        total >= 24,
+        "the command's rows are all counted: {total}\n{shown}"
+    );
+    assert!(shown.contains(&format!("rows 1–{page} of {total}")), "{shown}");
+    assert!(
+        !shown.contains(&format!("step-{:02}", page + 1)),
+        "the next row is on the next page: {shown}"
+    );
+
+    // Two ups from Deny reach "Allow for this session"; the dialog stays open and nothing runs.
+    rig.pty.send_key("up");
+    rig.pty.send_key("up");
+    let s = rig.pty.wait_for_text("→ Allow for this session").unwrap();
+    assert!(s.contains("Dangerous command"), "{s:?}");
+    assert!(!s.contains("refused as expected"), "{s:?}");
+    assert_eq!(
+        rig.generating().len(),
+        requests_at_ask,
+        "no new request: nothing ran"
+    );
+
+    // Page to the end: the benign tail becomes visible in the dialog itself. The bound is on
+    // the presses, not on a page count, so a page-size change cannot leave the test short.
+    for _ in 0..40 {
+        rig.pty.send_key("pagedown");
+    }
+    rig.pty
+        .wait_for_named(
+            "the last preview page",
+            |s| dialog_rows(s).iter().any(|r| r.contains("step-24")),
+            WAIT,
+        )
+        .unwrap();
+
+    // Deny still answers immediately; the model hears the refusal.
+    rig.pty.send_key("escape");
+    rig.pty.wait_for_text("the user declined this action").unwrap();
+    rig.pty.wait_for_text("refused as expected").unwrap();
+}
+
 /// Permission prompt Once / Session / Deny; mode cycle; timed dialogs
 #[test]
 fn tui_027() {

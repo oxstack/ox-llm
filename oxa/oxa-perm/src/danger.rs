@@ -1669,7 +1669,7 @@ fn read_word(chars: &[char], start: usize, depth: usize, out: &mut Vec<Stage>) -
 
 /// The raw text up to the `)` that closes a `$(` opened just before `start`, and the index
 /// after it. Quotes and backslashes are skipped over while counting parentheses.
-fn scan_paren(chars: &[char], start: usize) -> Option<(String, usize)> {
+pub(crate) fn scan_paren(chars: &[char], start: usize) -> Option<(String, usize)> {
     let mut depth = 1usize;
     let mut s = String::new();
     let mut p = start;
@@ -1733,7 +1733,7 @@ fn scan_paren(chars: &[char], start: usize) -> Option<(String, usize)> {
 }
 
 /// The raw text up to the closing backtick, and the index after it.
-fn scan_backtick(chars: &[char], start: usize) -> Option<(String, usize)> {
+pub(crate) fn scan_backtick(chars: &[char], start: usize) -> Option<(String, usize)> {
     let mut s = String::new();
     let mut p = start;
     while p < chars.len() {

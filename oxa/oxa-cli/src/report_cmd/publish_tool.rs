@@ -114,8 +114,9 @@ not count. Takes the draft path the draft command printed."
         Ok(real)
     }
 
-    fn publish(&self, args: &Value, mode: oxa_proto::Mode, ui: &mut dyn Ui) -> ToolOutput {
-        if mode == oxa_proto::Mode::Plan {
+    fn publish(&self, args: &Value, ctx: &ToolCtx, ui: &mut dyn Ui) -> ToolOutput {
+        let session = session_scope(ctx);
+        if ctx.mode == oxa_proto::Mode::Plan {
             return ToolOutput::error("report_publish is unavailable in plan mode (read-only)");
         }
         let draft = match self.draft_path(args) {
@@ -145,19 +146,19 @@ not count. Takes the draft path the draft command printed."
                 return Some(true);
             }
             // The owner already typed `yes` for exactly this text.
-            if owner_reply::take_approved(&digest) {
+            if owner_reply::take_approved(session, &digest) {
                 return Some(true);
             }
             match ui.approve_publication(DIALOG_TITLE, &text) {
                 Some(true) => return Some(true),
                 Some(false) => {
-                    owner_reply::clear();
+                    owner_reply::clear_for(session, &digest);
                     return Some(false);
                 }
                 None => {}
             }
             // Show the exact text and wait for the owner's own reply.
-            owner_reply::await_reply(&digest);
+            owner_reply::await_reply(session, &digest);
             ui.notify(
                 &format!("{text}\n\nType yes to publish exactly this text."),
                 oxa_proto::Level::Info,
@@ -202,6 +203,15 @@ not count. Takes the draft path the draft command printed."
     }
 }
 
+/// The session that runs the tool: its `OXA_SESSION_ID`, which is also the scope of a typed
+/// publication `yes`. An empty scope (a direct test call) shares one process-wide scope.
+fn session_scope<'a>(ctx: &ToolCtx<'a>) -> &'a str {
+    ctx.env
+        .iter()
+        .find(|(name, _)| name == "OXA_SESSION_ID")
+        .map_or("", |(_, id)| id.as_str())
+}
+
 impl Tool for PublishTool {
     fn spec(&self) -> &ToolSpec {
         &self.spec
@@ -219,7 +229,7 @@ impl Tool for PublishTool {
     }
     fn run(&self, args: &Value, ctx: &ToolCtx, _: &mut dyn FnMut(&str)) -> ToolOutput {
         let mut headless = oxa_proto::HeadlessUi::default();
-        self.publish(args, ctx.mode, &mut headless)
+        self.publish(args, ctx, &mut headless)
     }
     fn run_with_ui(
         &self,
@@ -228,7 +238,7 @@ impl Tool for PublishTool {
         _: &mut dyn FnMut(&str),
         ui: &mut dyn Ui,
     ) -> ToolOutput {
-        self.publish(args, ctx.mode, ui)
+        self.publish(args, ctx, ui)
     }
 }
 

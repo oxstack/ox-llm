@@ -519,6 +519,15 @@ read its result; they never launch builds or tests.
   replay checks; do not add a per-command parser beside it. A `wait` `until` probe that runs `gh` is network access
   (`Hooks::poll_access`): plan denies it, ask asks once per host. These rules are hardening: a command that slips
   past them by obfuscation is P3.
+- **Approval views (#1772, #1942):** every view of a dangerous command masks through the one
+  `oxa_perm::mask_command` (named assignments, flag operands, URL credentials, literals in `${...}`) and never
+  masks executable text; do not add a per-shape masker. The dialog shows shell lines as dialog lines. Long command
+  and publication previews are paged inside the terminal's own rows; paging is optional (`pageup`/`pagedown`),
+  Deny stays the default and answers at once, and an allow choice is available from any page. An approval
+  is saved for the session (ends with the run) or always (the exact `<rule> <command>` key in user settings,
+  merged under the settings lock). A typed publication `yes` stays bound to the session and exact text that showed it
+  (its digest, single use) and is not withdrawn when the session changes; another request or
+  session cannot consume it.
 - **Sandbox standard (owner decision, #1512 and 2026-11-19). Do not add an OS sandbox outside these rules:**
   - **Interactive CLI the owner talks to:** no OS sandbox by default, on Linux and macOS alike. A
     dangerous command gets an owner approval (once, this session, always, deny), never bwrap.
