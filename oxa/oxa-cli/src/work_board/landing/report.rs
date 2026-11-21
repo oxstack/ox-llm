@@ -37,6 +37,18 @@ pub(in crate::work_board) struct Settings {
 }
 
 impl Settings {
+    /// A second sample's own copy: the policy, not the verified history. Two sample runs
+    /// never share the mutable record of what one of them already verified, and each reads
+    /// the archives it needs for its own rejections.
+    pub(in crate::work_board) fn fork(&self) -> Self {
+        Self {
+            workflow_path: self.workflow_path.clone(),
+            required_check_names: self.required_check_names.clone(),
+            reports: self.reports.clone(),
+            verified: BTreeMap::new(),
+        }
+    }
+
     pub(in crate::work_board) fn read(path: &Path) -> Result<Self, String> {
         let input = oxa_work::shadow::read_queue_report_policy(path)?;
         let invalid = "invalid queue report policy";

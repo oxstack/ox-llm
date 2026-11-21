@@ -159,6 +159,31 @@ pub(super) const ENTRIES: &[Descriptor] = &[
     .apply(Apply::Restart)
     .web(WebEdit::Confirm)
     .widens("Changes the address the web UI listens on."),
+    // The in-process sampler (#2262): seconds between two samples `oxa lead serve` runs, and
+    // the repository it samples. A `Retry` samples at once; a failed sample backs off to 15 min.
+    d(
+        "oxa.lead.serve.sample_secs",
+        Group::Lead,
+        "",
+        "Seconds between samples",
+        "Seconds between two GitHub samples inside `oxa lead serve` (60 when unset). Needs a token source.",
+    )
+    .key(Kind::Number, "60")
+    .number(Unit::Seconds)
+    .user_only()
+    .apply(Apply::Restart)
+    .web(WebEdit::Edit),
+    d(
+        "oxa.lead.serve.repo",
+        Group::Lead,
+        "",
+        "Sampled repository",
+        "`OWNER/REPO` the sampler reads; unset uses the project's origin.",
+    )
+    .text()
+    .user_only()
+    .apply(Apply::Restart)
+    .web(WebEdit::Edit),
     d("oxa.lead.serve.port", Group::Lead, "", "Port", "1 to 65535.")
         .number(Unit::Count)
         .hard(1, 65535, 1, "a port from 1 to 65535")

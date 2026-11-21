@@ -27,6 +27,12 @@ retained across samples or read from a credential file. The five-minute user tim
 may instead remint externally and repeat `--once` with `GH_TOKEN`. It requires a
 trusted source project and an explicit `GH_TOKEN` supplied by a GitHub App caller;
 offline mode refuses before GitHub or log creation. No worker or mutation runs.
+
+`oxa lead serve` can run this sample itself, with no timer: see
+[the lead web page](pages/lead-web.md#the-sample-inside-the-server). Both paths write the
+same log and run the same sample (`work_board::sample_once`); a fresh token is taken per
+sample, and neither keeps one. Do not run both against one log unless that is what you
+want: each records its own samples, and the page counts them by time.
 The private, locked `work/<project-hash>/board/OWNER/REPO/board-shadow.jsonl` under the agent
 directory appends `{schema_version:1,observed_at,board,would_take}`. Eligible shared
 board entries form `would_take`; shadow reserves no leases or attempts. Use one

@@ -84,6 +84,9 @@ pub struct View<'a> {
     pub attached: Option<AttachedView<'a>>,
     /// The owner's running sessions to choose from, on the chat page only (#1469).
     pub sessions: Option<SessionListView<'a>>,
+    /// The in-process sample (#2262): its interval, last attempt, cause and next attempt time.
+    /// `None` when no sample is configured; the external timer keeps the board fresh then.
+    pub sampler: Option<crate::lead_sampler::Status>,
 }
 
 /// The sessions of this user that are running now, as the owner's chat page lists them.
@@ -181,6 +184,43 @@ fn subject(value: &Subject) -> String {
     }
 }
 
+/// The top bar's one line about the sample (#2262): how fresh the board is, how often it is
+/// sampled, and after a failed sample its fixed cause and the next attempt's time.
+fn sampler_line(view: &View<'_>, now: u64) -> String {
+    let Some(status) = view.sampler.as_ref() else {
+        return "<span id=connection class=age>Sampling: external timer</span>".into();
+    };
+    let every = if status.every == 1 {
+        "every second".to_owned()
+    } else {
+        format!("every {} s", status.every)
+    };
+    let line = if let Some(failed) = &status.failed {
+        // A failed sample always says why and when the next one comes.
+        let next = status.next_at.map_or_else(
+            || "the next sample".into(),
+            |next| format!("next sample {}", human_time(next, now)),
+        );
+        format!(
+            "Sample failed {}: {} · {next} · {every}",
+            human_time(failed.at, now),
+            escape(&failed.cause)
+        )
+    } else if let (Some(at), Some(observed)) = (status.last_ok, status.observed_at) {
+        format!(
+            "Sample {} s ago · board data {} · {every}",
+            now.saturating_sub(at),
+            human_time(observed, now)
+        )
+    } else if status.running {
+        format!("Sampling GitHub now · {every}")
+    } else {
+        format!("Sampling GitHub · {every}")
+    };
+    // The Retry is a plain link: it works without JS and is never a form of its own.
+    format!("<span id=connection class=age>{line} · <a href=/retry>Retry</a></span>")
+}
+
 /// Full server-rendered page; scripts/styles are same-origin resources, without a CDN.
 pub fn document(view: &View<'_>, now: u64) -> String {
     document_for(Page::Home, view, now)
@@ -208,7 +248,7 @@ pub fn document_for(page: Page, view: &View<'_>, now: u64) -> String {
     } else {
         ""
     };
-    format!("<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1,viewport-fit=cover\"><meta name=color-scheme content=\"light dark\">{live}{digest}<title>oxa lead</title><link rel=stylesheet href=/style.css><script src=/live.js defer></script>{refresh}<a class=skip href=#main>Skip to content</a><header class=top><a href=/>oxa <b>lead</b></a><span id=connection class=age>Snapshot</span></header>{}</html>", content_for(page, view, now))
+    format!("<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1,viewport-fit=cover\"><meta name=color-scheme content=\"light dark\">{live}{digest}<title>oxa lead</title><link rel=stylesheet href=/style.css><script src=/live.js defer></script>{refresh}<a class=skip href=#main>Skip to content</a><header class=top><a href=/>oxa <b>lead</b></a>{}</header>{}</html>", sampler_line(view, now), content_for(page, view, now))
 }
 
 /// Allow-listed HTML fragment, also used by SSE. No worktrees, sessions, errors or headers.

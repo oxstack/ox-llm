@@ -359,6 +359,22 @@ pub(crate) fn github_token_command(settings: &Settings) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The configured token command as one trusted program: a bare first word is resolved in the
+/// tool directories of `PATH`; every operand must be a trusted absolute helper (#2262 reuses
+/// this for the lead web sampler, which runs the command once per sample).
+pub(crate) fn token_program(argv: &[String], cwd: &Path, home: &Path) -> Option<Vec<String>> {
+    let (program, rest) = argv.split_first()?;
+    let path = std::env::var_os("PATH");
+    let program = if program.contains('/') {
+        program.clone()
+    } else {
+        trusted_executable_for(program, path.as_deref(), Some(cwd), Some(home))?
+            .to_str()?
+            .to_owned()
+    };
+    Some(std::iter::once(program).chain(rest.iter().cloned()).collect())
+}
+
 fn github_token_ttl(settings: &Settings) -> std::time::Duration {
     let secs = settings
         .user_value(SETTING_GH_TOKEN_TTL)

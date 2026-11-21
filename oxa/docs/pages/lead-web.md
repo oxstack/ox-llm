@@ -1,6 +1,41 @@
-# Lead web access scaffold
+# Lead web
 
 Run `oxa lead serve` to serve the read-only board after enabling it in user settings.
+
+## The sample inside the server
+
+With a token source configured, `oxa lead serve` samples GitHub itself, so the board does
+not need a five-minute user timer. `oxa.github.tokenCommand` supplies one fresh App token
+per sample through the same vetted helper path `oxa work --publish` uses, or `GH_TOKEN` in
+the service's environment is accepted the way `oxa work board` accepts it. The token is
+never stored and never reaches the page. The repository is `oxa.lead.serve.repo` when set,
+otherwise the serving project's `origin`.
+
+- **Interval.** `oxa.lead.serve.sample_secs` (default 60) sets the seconds between two
+  samples. The sample is the one `oxa work board --shadow --once --landing-shadow
+  --lead-alarms` runs, with the owner's `oxa.lead.github_reserve` reserve: a deferred
+  optional read is recorded in the sample and shown, never hidden.
+- **One sample at a time.** One thread owns every attempt, so two taps of `Retry` cannot run
+  two samples at once.
+- **Retry.** The link in the top bar asks for a sample now, including after a failure it
+  would otherwise back off from. It works without JavaScript.
+- **The top bar says how it went.** It shows how long ago the last sample succeeded, how
+  often it runs, and, after a failed sample, the fixed cause and the time of the next
+  attempt (for example "Sample failed 14:02: GitHub rate-limited this sample; the next
+  attempt is scheduled · next sample 14:12 · every 60 s"). The cause is one sentence from
+  a fixed list, so no path, token or raw error byte reaches the page. A failing sample waits
+  one interval more each time, up to 15 minutes.
+- **No token source** means no sampler: the page says "Sampling: external timer", and the
+  timer you already run keeps working.
+- **Offline mode** starts no sampler.
+- **A page load after an idle period** samples at once instead of waiting out the interval;
+  loads within one interval ask once, so a reload does not start a sample per request.
+
+The sample needs the serving project to be trusted, like `oxa work board`; a refused project
+is reported as the failed sample's cause.
+
+## Access
+
 `OXA_LEAD_BOARD_LOG` selects an absolute private board log; refused input stays unavailable.
 The owner must read the final authentication composition before merge or live exposure.
 Chat remains separate work. The one owner-decision mutation is the approval answer below.

@@ -466,6 +466,9 @@ fn connection_fixed(
         ),
         Ok(("/style.css", None)) => ("200 OK", "text/css", crate::lead_page::STYLE.into()),
         Ok(("/live.js", None)) => ("200 OK", "text/javascript", crate::lead_page::SCRIPT.into()),
+        // A Retry is a sample request the caller starts before this response; the answer is the
+        // Home page in its new state, so the link works without JS and without a redirect.
+        Ok(("/retry", None)) => ("200 OK", "text/html", render(Page::Home, false)),
         Ok((path, None)) => match Page::request(path) {
             Some((page, fragment)) => ("200 OK", "text/html", render(page, fragment)),
             None => ("404 Not Found", "text/plain", "Not found".into()),

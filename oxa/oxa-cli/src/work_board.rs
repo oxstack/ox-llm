@@ -855,6 +855,49 @@ impl GitHub for Reader<'_> {
     }
 }
 
+/// Whether the serving project is trusted for a sample. The same check the command runs,
+/// with the notices discarded: the page reports a refusal as its own cause.
+pub(crate) fn sampler_trusted(root: &Path, dirs: &oxa_config::Dirs) -> bool {
+    crate::work_cmd::trusted(root, &oxa_config::Env::from_process(), dirs, &mut std::io::sink())
+        .unwrap_or(false)
+}
+
+/// The one fixed line the page shows for a failed sample: never a path, token or raw error
+/// byte, only this allow-list of causes.
+pub(crate) fn sample_cause(error: &str) -> String {
+    let cause = if error == DEFERRED {
+        "the GitHub App reserve deferred this sample"
+    } else if error.contains("not trusted") || error.contains("needs_trust") {
+        "the serving project is not trusted; approve it in an interactive oxa"
+    } else if error.contains("RATE_LIMITED") || error.contains("rate limit") {
+        "GitHub rate-limited this sample"
+    } else if error.contains("deadline") || error.contains("byte limit") {
+        "the GitHub sample reached its size or time bound"
+    } else if error.contains("capture refused") {
+        "the sample could not start its GitHub read"
+    } else if error.contains("HTTP 401") || error.contains("HTTP 403") || error.contains("FORBIDDEN") {
+        "GitHub refused the sample; check the App installation"
+    } else if error.contains("HTTP 4") {
+        "GitHub refused the sample"
+    } else if error.contains("GitHub read failed")
+        || error.contains("HTTP 5")
+        || error.contains("GitHub GraphQL error")
+    {
+        "GitHub failed the read"
+    } else if error.contains("changed") {
+        "the open PR set changed during the read"
+    } else if error.contains("token") {
+        "the GitHub App token source failed"
+    } else if error.contains("gh executable") {
+        "no trusted gh executable for the sample"
+    } else if error.contains("private") || error.contains("log") || error.contains("storage") {
+        "the board log cannot be written by this service"
+    } else {
+        "the GitHub sample failed"
+    };
+    format!("{cause}; the next attempt is scheduled")
+}
+
 pub(crate) fn run(
     args: &[String],
     root: &Path,
@@ -929,7 +972,7 @@ pub(crate) fn run(
     let review_settings = review_file
         .map(|path| review::Settings::read(Path::new(path)))
         .transpose()?;
-    let mut report_settings = report_file
+    let report_settings = report_file
         .map(|path| landing::report::Settings::read(Path::new(path)))
         .transpose()?;
     let inherited = (!streamed)
@@ -955,6 +998,20 @@ pub(crate) fn run(
         .create(&storage)
         .map_err(|_| "cannot create shadow storage")?;
     oxa_work::require_private_directory(&storage)?;
+    let source = SampleSource {
+        gh,
+        repo: repo.to_owned(),
+        path: &policy.host_path,
+        root,
+        policy: Some(policy),
+        review_settings,
+        report_settings,
+        queue_evidence,
+        landing_shadow,
+        lead_alarms,
+        quota_shadow,
+        reserve,
+    };
     let mut log = oxa_work::shadow::open_log(&storage.join("board-shadow.jsonl"))?;
     oxa_work::shadow::run_with_landing(
         &mut log,
@@ -965,85 +1022,172 @@ pub(crate) fn run(
             } else {
                 inherited.ok_or("missing App token")?.to_owned()
             };
-            let mut reader = Reader::new(&gh, &policy.host_path, repo, &token);
-            if quota_shadow {
-                reader.app_quota = Some(RefCell::new(GitHubQuotas::default()));
-                reader.reserve = reserve;
-            }
-            reader.review_rows = review_settings.as_ref().map(|_| Value::Null);
             let now = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .map_err(|_| "invalid system clock")?
                 .as_secs();
-            let board_policy = Policy {
-                enabled: true,
-                ..Policy::default()
-            };
-            let (board, reviews) = if let Some(settings) = &review_settings {
-                review::sample(&mut reader, root, policy, &board_policy, settings, now)
-            } else {
-                Board::read(&mut reader, &board_policy, &BTreeMap::new(), now)
-                    .map(|board| (board, BTreeMap::new()))
-            }?;
-            let mut queue_rejections = if queue_evidence || landing_shadow || report_settings.is_some() {
-                oxa_work::board::queue::read(&board, |fields| reader.repository_read(fields))?
-            } else {
-                Vec::new()
-            };
-            if let Some(settings) = &mut report_settings {
-                match reader.optional("sample_test_reports", |r| {
-                    r.sample_test_reports(&mut queue_rejections, settings)
-                }) {
-                    Err(error) if error.contains(DEFERRED) => {}
-                    result => result?,
-                }
-            }
-            let (landing, landing_main) = if landing_shadow {
-                landing::review_decisions(&reader, &board)?
-            } else {
-                (BTreeMap::new(), None)
-            };
-            // Opt-in alarm records for the protected Lead view (#1391). Each source
-            // fails independently, so one missing record never hides the others and a
-            // degraded sample stays an explicit partial observation.
-            let (panels, runs) = if lead_alarms {
-                let panels = match reader.optional("lead_panels", Reader::lead_panels) {
-                    Ok(panels) => Some(panels),
-                    Err(error) => {
-                        eprintln!("oxa work: lead panels unavailable in this sample: {error}");
-                        None
-                    }
-                };
-                let runs = match reader.optional("queued_run_pages", Reader::queued_run_pages) {
-                    Ok(runs) => Some(runs),
-                    Err(error) => {
-                        eprintln!("oxa work: queued-run observation unavailable in this sample: {error}");
-                        None
-                    }
-                };
-                (panels, runs)
-            } else {
-                (None, None)
-            };
-            reader.time_left().map_err(QueryError::message)?;
-            Ok(oxa_work::shadow::LandingSample {
-                board,
-                reviews,
-                queue_rejections,
-                landing,
-                landing_main,
-                panels,
-                runs,
-                app_quota: reader
-                    .app_quota
-                    .as_ref()
-                    .and_then(|quota| quota.borrow().app_sample(now)),
-                quota_deferred: reader.deferred.take(),
-            })
+            source.sample(now, token)
         },
         std::thread::sleep,
     )?;
     Ok(0)
+}
+
+/// One `oxa work board --shadow` sample, shared with the lead web's in-process sampler
+/// (`crate::lead_sampler`, #2262) instead of a second copy. One call is one protected record
+/// with its own GraphQL `Reader`, bounds and lead alarms. The log is opened and written by
+/// `shadow::run_with_landing` through the caller's closure, as before.
+struct SampleSource<'a> {
+    gh: std::path::PathBuf,
+    repo: String,
+    path: &'a std::ffi::OsStr,
+    root: &'a Path,
+    /// The runner policy: with review settings it also needs the runner's own state.
+    policy: Option<&'a oxa_work::RunPolicy>,
+    review_settings: Option<review::Settings>,
+    report_settings: Option<landing::report::Settings>,
+    queue_evidence: bool,
+    landing_shadow: bool,
+    lead_alarms: bool,
+    quota_shadow: bool,
+    reserve: Option<u64>,
+}
+
+impl SampleSource<'_> {
+    fn sample(&self, now: u64, token: String) -> Result<oxa_work::shadow::LandingSample, String> {
+        let mut reader = Reader::new(&self.gh, self.path, &self.repo, &token);
+        if self.quota_shadow {
+            reader.app_quota = Some(RefCell::new(GitHubQuotas::default()));
+            reader.reserve = self.reserve;
+        }
+        reader.review_rows = self.review_settings.as_ref().map(|_| Value::Null);
+        let board_policy = Policy {
+            enabled: true,
+            ..Policy::default()
+        };
+        let (board, reviews) = if let Some(settings) = &self.review_settings {
+            let policy = self.policy.ok_or("review sampling requires the runner policy")?;
+            review::sample(&mut reader, self.root, policy, &board_policy, settings, now)
+        } else {
+            Board::read(&mut reader, &board_policy, &BTreeMap::new(), now)
+                .map(|board| (board, BTreeMap::new()))
+        }?;
+        let mut queue_rejections =
+            if self.queue_evidence || self.landing_shadow || self.report_settings.is_some() {
+                oxa_work::board::queue::read(&board, |fields| reader.repository_read(fields))?
+            } else {
+                Vec::new()
+            };
+        // One sample owns its report history: it writes back the attempts it verified, which
+        // the next sample's command run starts from.
+        let mut report_settings = self.report_settings.as_ref().map(landing::report::Settings::fork);
+        if let Some(settings) = &mut report_settings {
+            match reader.optional("sample_test_reports", |r| {
+                r.sample_test_reports(&mut queue_rejections, settings)
+            }) {
+                Err(error) if error.contains(DEFERRED) => {}
+                result => result?,
+            }
+        }
+        let (landing, landing_main) = if self.landing_shadow {
+            landing::review_decisions(&reader, &board)?
+        } else {
+            (BTreeMap::new(), None)
+        };
+        // Opt-in alarm records for the protected Lead view (#1391). Each source
+        // fails independently, so one missing record never hides the others and a
+        // degraded sample stays an explicit partial observation.
+        let (panels, runs) = if self.lead_alarms {
+            let panels = match reader.optional("lead_panels", Reader::lead_panels) {
+                Ok(panels) => Some(panels),
+                Err(error) => {
+                    eprintln!("oxa work: lead panels unavailable in this sample: {error}");
+                    None
+                }
+            };
+            let runs = match reader.optional("queued_run_pages", Reader::queued_run_pages) {
+                Ok(runs) => Some(runs),
+                Err(error) => {
+                    eprintln!("oxa work: queued-run observation unavailable in this sample: {error}");
+                    None
+                }
+            };
+            (panels, runs)
+        } else {
+            (None, None)
+        };
+        reader.time_left().map_err(QueryError::message)?;
+        Ok(oxa_work::shadow::LandingSample {
+            board,
+            reviews,
+            queue_rejections,
+            landing,
+            landing_main,
+            panels,
+            runs,
+            app_quota: reader
+                .app_quota
+                .as_ref()
+                .and_then(|quota| quota.borrow().app_sample(now)),
+            quota_deferred: reader.deferred.take(),
+        })
+    }
+}
+
+/// The in-process sample `oxa lead serve` runs (#2262): the same sample as
+/// `oxa work board --shadow --once --landing-shadow --lead-alarms`, written by the same
+/// `shadow::run_with_landing`, with a fresh token per attempt and the owner's App reserve.
+/// `board` is the owner's absolute board log; `host_path` the trusted executable path.
+/// A failure is reduced to one fixed cause line by [`sample_cause`].
+pub(crate) fn sample_once(
+    dirs: &oxa_config::Dirs,
+    root: &Path,
+    repo: &str,
+    board: &Path,
+    gh: &Path,
+    host_path: &std::ffi::OsStr,
+    token: String,
+) -> Result<u64, String> {
+    if oxa_proto::offline() {
+        return Err("GitHub board is unavailable in offline mode".into());
+    }
+    if !oxa_work::valid_repository(repo) {
+        return Err("expected OWNER/REPO".into());
+    }
+    let reserve = oxa_config::Settings::load(dirs, root, false)
+        .user_value("oxa.lead.github_reserve")
+        .and_then(Value::as_u64);
+    let source = SampleSource {
+        gh: gh.to_path_buf(),
+        repo: repo.to_owned(),
+        path: host_path,
+        root,
+        policy: None,
+        review_settings: None,
+        report_settings: None,
+        queue_evidence: false,
+        landing_shadow: true,
+        lead_alarms: true,
+        quota_shadow: true,
+        reserve,
+    };
+    let mut log = oxa_work::shadow::open_log(board)?;
+    let mut sampled_at = None;
+    oxa_work::shadow::run_with_landing(
+        &mut log,
+        true,
+        || {
+            let now = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_err(|_| "invalid system clock")?
+                .as_secs();
+            let sample = source.sample(now, token.clone())?;
+            sampled_at = Some(now);
+            Ok(sample)
+        },
+        std::thread::sleep,
+    )?;
+    sampled_at.ok_or_else(|| "the sample wrote nothing".into())
 }
 
 #[cfg(test)]
