@@ -111,6 +111,7 @@ Commands take the place of the message. They do not start a session.
 | `oxa login chatgpt --experimental [--paste] [--replace]` | explicit owner-only native ChatGPT sign-in |
 | `oxa logout chatgpt` | remove the private ChatGPT token record |
 | `oxa status <session-id\|session-file> [--session-dir <dir>]` | read a saved session's progress and stall signal without contacting an engine |
+| `oxa cache <session-id\|path> [--json]` | [report saved prompt-cache evidence](#prompt-cache-report) for a local or cloud session |
 | `oxa models [--json] [search]` | list the local and cloud models this install can serve — where each runs, its limits and which one is the default; `--json` prints one `oxa_models` object, and a search word filters by place, provider or model name; reads no key and no ledger, runs no model |
 | `oxa send [--follow-up] <session-id> <text\|-> [--wait SECONDS]` | send one message to the session's TUI, RPC owner, headless goal run or a running `oxa work` worker (which takes it at its next turn boundary): a steer for its next tool boundary, or with `--follow-up` a follow-up for the end of its turn; `-` reads standard input. Prints one JSON line `{"id":<message-id>,"outcome":"queued"\|"delivered"\|"not_delivered"}`. With `--wait` the command waits up to that many seconds for the owner to take the file: `delivered` exits 0, `not_delivered` exits 3 |
 | `oxa send <session-id> --retry <message-id> [--wait SECONDS]` | check the same message again without publishing it a second time (same receipt line and exit codes) |
@@ -155,6 +156,16 @@ Metered cloud aliases need `oxa.engine.inProcessCloud`, a configured price, and 
 `oxa report-issue draft` takes `--title <text>` (required), and the notes either inline with `--notes <text>` or from a file with `--notes-file <path>` (relative paths are taken from the current directory). It writes the draft under `issue-drafts/` in the agent directory and prints its path; it posts nothing. `oxa report-issue submit <draft>` posts it after you type `yes` in a terminal. Inside an interactive oxa session, ask for the draft to be published instead: in yolo it posts at once and shows the result; otherwise oxa shows the exact text in an approval dialog (or you type `yes`), and the model can request it but never answer it.
 
 `oxa config` lists the settings as oxa resolves them.
+
+### Prompt-cache report
+
+Run `oxa cache <session-id|path>` for a table, or add `--json` for a versioned `oxa_cache` object. The command reads a saved local or cloud session without contacting a model, changing the session, or adding anything to prompts. An id may be abbreviated if unique; use the `.jsonl` path if the session is outside your current session directory.
+
+There is one row per **saved usage record**, in file order. Retries, failures, discarded replies and some prefills may have no record. The row number is not a provider request id. `input` and `cached` are recorded token counts; `null` (shown as `?` in the table) means not reported, not zero. The optional `previous_input_reuse_estimate` is what reusing the entire previous saved chat input would count as. It is a comparison baseline, not an expected engine hit or proof of which earlier request supplied a cache entry.
+
+When two successive saved chats have known frozen system text and tool lists, the report compares those saved anchors. A system difference is a zero-based UTF-8 byte offset within the saved system text, not an offset in the full outbound request, a provider's rendered prompt, or the engine's tokens. A recorded boundary such as an epoch or compaction is an observation, not a miss cause. The runtime expectation, source request, full request divergence and miss cause remain unknown when the session did not retain that evidence. An equal anchor or equal token count does not establish an equal request. No text, hashes, tool data, or session, request or token IDs are printed.
+
+The scan reads at most 256 MiB or 200,000 entries from the file as it existed at open. Lines over 2 MiB are skipped; an unreadable line or torn tail also makes the report partial (`scan_complete: false`). A complete scan still only describes saved records. If id lookup reaches its limit, give the file path instead.
 
 ### Local models
 

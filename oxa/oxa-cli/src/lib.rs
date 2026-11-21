@@ -19,6 +19,7 @@
 mod approval;
 mod approve_cmd;
 mod args;
+mod cache_cmd;
 mod child;
 mod config_cmd;
 mod dispatch;

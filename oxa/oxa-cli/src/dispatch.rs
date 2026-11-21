@@ -247,6 +247,7 @@ pub fn run(argv: &[String], env: &Env, io: Stdio) -> i32 {
                         crate::lead_loop::asks(&dirs, &cwd, env, &mut *stdout)
                     }
                     CommandId::Usage => crate::usage_cmd::run(&words.0, &dirs, &cwd, &mut *stdout),
+                    CommandId::Cache => crate::cache_cmd::run(&words.0, &dirs, &cwd, env, &mut *stdout),
                     CommandId::Lead
                     | CommandId::LeadServe
                     | CommandId::LeadBoard

@@ -1436,24 +1436,34 @@ fn open_err(path: &Path, e: &io::Error) -> OxaError {
     OxaError::io(&format!("cannot open session file {}", path.display()), e)
 }
 
-pub(crate) fn read_file(path: &Path) -> Result<Vec<u8>, OxaError> {
-    let mut f = OpenOptions::new()
+fn open_read(path: &Path, extra_flags: libc::c_int) -> Result<File, OxaError> {
+    OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW | extra_flags)
         .open(path)
-        .map_err(|e| open_err(path, &e))?;
+        .map_err(|e| open_err(path, &e))
+}
+
+pub(crate) fn read_file(path: &Path) -> Result<Vec<u8>, OxaError> {
+    let mut f = open_read(path, 0)?;
     let mut bytes = Vec::new();
     f.read_to_end(&mut bytes)
         .map_err(|e| OxaError::io(&format!("cannot read {}", path.display()), &e))?;
     Ok(bytes)
 }
 
+/// Header and diagnostic reads must not block opening a FIFO passed as a session path.
+pub(crate) fn open_regular_session(path: &Path) -> Result<File, OxaError> {
+    check_safe(path)?;
+    let file = open_read(path, libc::O_NONBLOCK)?;
+    if !file.metadata().map_err(|e| open_err(path, &e))?.is_file() {
+        return Err(invalid("session path must be a regular file"));
+    }
+    Ok(file)
+}
+
 fn read_first_line(path: &Path) -> Result<Vec<u8>, OxaError> {
-    let f = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-        .map_err(|e| open_err(path, &e))?;
+    let f = open_read(path, 0)?;
     let mut line = Vec::new();
     BufReader::new(f)
         .read_until(b'\n', &mut line)
@@ -1497,31 +1507,52 @@ fn read_session(path: &Path) -> Result<(SessionHeader, Vec<Entry>), OxaError> {
 /// Every session file below `root` (of `cwd`'s directory only, when given), sorted by path.
 /// Symlinked directories and files are not listed.
 fn session_files(root: &Path, cwd: Option<&Path>) -> Vec<PathBuf> {
-    let dirs: Vec<PathBuf> = match cwd {
-        Some(c) => vec![root.join(session_dir_name(c))],
-        None => match fs::read_dir(root) {
-            Ok(entries) => entries.filter_map(|e| e.ok().map(|e| e.path())).collect(),
-            Err(_) => Vec::new(),
-        },
-    };
     let mut out = Vec::new();
+    visit_session_files(root, cwd, usize::MAX, |p| out.push(p));
+    out.sort();
+    out
+}
+
+/// Visit regular session files without buffering directory contents. Count every directory
+/// entry inspected, not just sessions. Return false if the walk reaches its budget.
+pub(crate) fn visit_session_files(
+    root: &Path,
+    cwd: Option<&Path>,
+    mut remaining: usize,
+    mut visit: impl FnMut(PathBuf),
+) -> bool {
+    let project = cwd.map(|c| root.join(session_dir_name(c)));
+    let dirs = project.into_iter().map(Some).chain(
+        cwd.is_none()
+            .then(|| fs::read_dir(root).ok())
+            .flatten()
+            .into_iter()
+            .flatten()
+            .map(|e| e.ok().map(|e| e.path())),
+    );
     for dir in dirs {
+        if remaining == 0 {
+            return false;
+        }
+        remaining -= 1;
+        let Some(dir) = dir else { continue };
         if is_symlink(&dir) || !dir.is_dir() {
             continue;
         }
         let Ok(entries) = fs::read_dir(&dir) else { continue };
-        for entry in entries.flatten() {
+        for entry in entries {
+            if remaining == 0 {
+                return false;
+            }
+            remaining -= 1;
+            let Ok(entry) = entry else { continue };
             let p = entry.path();
-            let is_file = fs::symlink_metadata(&p)
-                .map(|m| m.file_type().is_file())
-                .unwrap_or(false);
-            if is_file && p.extension().is_some_and(|x| x == "jsonl") {
-                out.push(p);
+            if p.extension().is_some_and(|x| x == "jsonl") && entry.file_type().is_ok_and(|t| t.is_file()) {
+                visit(p);
             }
         }
     }
-    out.sort();
-    out
+    true
 }
 
 /// The path of the session file with this id, if one exists under `root`.

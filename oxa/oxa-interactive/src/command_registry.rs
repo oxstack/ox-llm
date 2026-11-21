@@ -139,6 +139,22 @@ commands! {
         },
         requirements: NO_REQUIREMENTS,
     },
+    Cache {
+        path: &["cache"],
+        aliases: &[],
+        summary: "Report saved prompt-cache evidence without contacting a model",
+        arguments: &[
+            Argument { name: "session-id|path", kind: ArgumentKind::Word, required: true },
+            Argument { name: "json", kind: ArgumentKind::Flag, required: false },
+        ],
+        surfaces: Surfaces {
+            cli: Availability::Supported,
+            slash: Availability::Exception("Cache reports are a CLI command"),
+            menu: Availability::Exception("Cache reports are a CLI command"),
+            web: Availability::Exception("Cache reports are a CLI command"),
+        },
+        requirements: NO_REQUIREMENTS,
+    },
     WorkStatus {
         path: &["work", "status"],
         aliases: &[],

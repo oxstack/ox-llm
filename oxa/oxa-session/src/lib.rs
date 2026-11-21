@@ -32,6 +32,7 @@ pub use inbox::{
 };
 mod meta;
 mod ops;
+mod scan;
 mod spill;
 mod store;
 mod transcript;
@@ -46,6 +47,7 @@ pub use lifecycle::SpillLifecycleLock;
 pub use lock::{lock_holder, lock_path_of, SessionLock, LOCKED};
 pub use meta::{search_sessions, sort_sessions, SessionSort};
 pub use ops::{clone_session, fork_file, fork_session, set_label, set_name};
+pub use scan::SessionScan;
 pub use spill::{inherited_spill_dirs, remove_session_preserving_spills, remove_spill_dir_unless_forked};
 pub use store::{
     count_files, decode_entry, decode_header, encode_entry, encode_header, encode_visible_entry, iso_from_ms,
