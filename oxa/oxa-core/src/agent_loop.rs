@@ -205,6 +205,9 @@ fn run_inner(
     let mut idle_streak: u32 = 0;
     // `oxa.maxTurns` (default unset: no limit): model replies of this run (#507).
     let max_turns = st.settings.u32(crate::repeat::MAX_TURNS, 0);
+    // #2295: the verified-artifact line the failed-check repair request carries, taken by that
+    // request. A run whose checks all passed has none here.
+    let mut artifacts: Option<String> = None;
     'turns: loop {
         if crate::goal::terminal(st) {
             return Ok(RunEnd::Stopped);
@@ -299,18 +302,9 @@ fn run_inner(
             snapshot_keep: false,
             // The contract (including repair feedback) belongs to this run, not the
             // persisted conversation. Repeat it for tool/continuation requests too.
-            extra: st
-                .output_schema
-                .as_ref()
-                .map(|schema| {
-                    let instruction = if let Some(error) = &schema_repaired {
-                        format!("Your final answer did not match the output schema: {error}. Return only valid JSON matching this schema:")
-                    } else {
-                        "Your final answer must be JSON matching this schema:".to_owned()
-                    };
-                    vec![WireMsg::user(format!("{instruction}\n{}", schema.value()))]
-                })
-                .unwrap_or_default(),
+            // #2295: a verified-artifact line is the task of ONE request: it is taken here
+            // and sent again by no request.
+            extra: turn_extra(st, &mut artifacts, &schema_repaired),
             events: true,
             idem_key: String::new(),
         };
@@ -840,8 +834,13 @@ fn run_inner(
             st.stats.ci_polls += results.iter().filter(|r| r.ui["ciPoll"] == true).count() as u32;
             done.note_proof(&calls, &results);
             done.note_toolchain(&calls);
+            // #2295: with `done` checks in the run, keep this batch's written files as the
+            // verified result a repair names.
+            done.note_artifacts(crate::done::checks_run(st));
             done.note_bash(st, &results);
             crate::exec::note_stored_images(st, &results, sink)?;
+            // #2295: the next repair request (if any) carries this batch's verified files.
+            artifacts = done.verified_artifacts(&st.cwd);
             // Adaptive thinking (`think.rs`): the batch decides the next follow-up.
             crate::think::observe(st, &calls, &results, sink, ui);
             st.stats.tool_calls += calls.len() as u32;
@@ -1638,6 +1637,30 @@ fn failure_why(e: &OxaError, got_data: bool) -> &'static str {
         oxa_proto::codes::STREAM_BROKEN if got_data => shown_why::CUT,
         _ => shown_why::FAILED,
     }
+}
+
+/// The messages sent after the wire for one request and never stored: the output schema
+/// contract (with its repair feedback) and, once, the verified-artifact line of this turn
+/// (#2295, `done.rs`), taken here so no later reply repeats it.
+fn turn_extra(
+    st: &SessionState,
+    artifacts: &mut Option<String>,
+    schema_repaired: &Option<crate::output_schema::OutputValidationError>,
+) -> Vec<WireMsg> {
+    let mut extra: Vec<WireMsg> = st
+        .output_schema
+        .as_ref()
+        .map(|schema| {
+            let instruction = if let Some(error) = schema_repaired {
+                format!("Your final answer did not match the output schema: {error}. Return only valid JSON matching this schema:")
+            } else {
+                "Your final answer must be JSON matching this schema:".to_owned()
+            };
+            vec![WireMsg::user(format!("{instruction}\n{}", schema.value()))]
+        })
+        .unwrap_or_default();
+    extra.extend(artifacts.take().map(WireMsg::user));
+    extra
 }
 
 /// The placeholder of the assistant message a request is about to stream.

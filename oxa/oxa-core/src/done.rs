@@ -3,6 +3,19 @@
 //! tool call changed the work folder) and is about to stop runs them in the session sandbox; a failure goes back to the model as a user
 //! message, at most [`MAX_ROUNDS`] times. An entry `in <dir>: <command>` runs in `<dir>`, a folder
 //! of the session folder, instead of in the session folder itself.
+//!
+//! ## Artifacts already verified in this run (#2295)
+//!
+//! When a `bash` call fails and a `done` check passes after it in the same batch, and a file
+//! this run wrote successfully is still there, the repair message names those files before the
+//! failure text: they are the last verified result, so the fix is the part that differs (a
+//! diff against it), not a rebuild from scratch. The files are the batch's own successful
+//! `write`/`edit` paths: relative to the session folder (an absolute one inside it works),
+//! deduplicated at each file's last write, newest [`ARTIFACT_SHOWN`], each at most
+//! [`ARTIFACT_PATH_CAP`] bytes, nothing outside the folder. No file content is read, no lookup
+//! runs, a path that is gone is dropped quietly, and nothing is refused or asked: without a
+//! failed `bash` call and a passing check in the same batch, the repair text is unchanged. A run
+//! with no `done` checks to run (or a project's `done` in an untrusted folder) keeps nothing.
 use crate::exec::CallResult;
 use crate::SessionState;
 use oxa_proto::{
@@ -58,6 +71,10 @@ pub(crate) struct DoneState {
     /// Distinct paths the run's successful `edit`/`write` calls named, in first-use order
     /// (#2297). Tool-observed only; reported once at the end as acceptance evidence.
     changed_paths: Vec<String>,
+    /// #2295: the files the current batch wrote successfully, in call order.
+    written: Vec<String>,
+    /// #2295: a `bash` call of the current batch failed.
+    failed_command: bool,
 }
 /// T6: the acceptance tool a task names, and the proof state when a bash call first ran it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,6 +225,66 @@ pub(crate) struct Evidence {
     pub(crate) incomplete: bool,
 }
 
+/// Bytes of one file path in the verified-artifact line (#2295); longer paths are left out.
+const ARTIFACT_PATH_CAP: usize = 200;
+/// Files named by the verified-artifact line (#2295), the newest kept.
+const ARTIFACT_SHOWN: usize = 8;
+
+/// #2295: the line that opens a failed-check repair with the files this run wrote and a check
+/// just passed over. An absolute path inside `cwd` is shown relative to it; a path outside it,
+/// with a control character, over [`ARTIFACT_PATH_CAP`] bytes or no longer on disk is left out,
+/// returning `None` when nothing is left.
+fn artifact_line(cwd: &Path, written: &[String]) -> Option<String> {
+    let mut shown: Vec<&str> = Vec::new();
+    for raw in written {
+        let inside = Path::new(raw)
+            .strip_prefix(cwd)
+            .unwrap_or_else(|_| Path::new(raw));
+        let Some(rel) = inside.to_str() else {
+            continue;
+        };
+        // An absolute path outside the folder, a control character, an over-long path, or a
+        // file a later command deleted is not a result to compare against.
+        if inside == Path::new(raw) && Path::new(raw).is_absolute()
+            || rel.is_empty()
+            || rel.len() > ARTIFACT_PATH_CAP
+            || rel.chars().any(char::is_control)
+            || !cwd.join(rel).exists()
+        {
+            continue;
+        }
+        if !shown.contains(&rel) {
+            shown.push(rel);
+        }
+    }
+    if shown.is_empty() {
+        return None;
+    }
+    let from = shown.len().saturating_sub(ARTIFACT_SHOWN);
+    Some(format!(
+        "Not re-derived: these files were written successfully in this run and the check passed \
+         after their last write, so they are this run's verified result: {}. The failure is the \
+         part that differs: compare it with that result and change only what differs instead of \
+         rebuilding the files from scratch.",
+        shown[from..].join(", ")
+    ))
+}
+
+/// #2295: the path argument of a successful `write`/`edit` call (`None`: not a string).
+fn written_path(call: &ToolCall) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(&call.args_raw)
+        .ok()?
+        .get("path")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// #2295: whether this run has `done` checks to run. An untrusted project's `done` is never
+/// merged into the settings, so it is not in the list and nothing is kept for it.
+pub(crate) fn checks_run(st: &SessionState) -> bool {
+    !st.settings.done_commands().is_empty()
+}
+
 /// Whether the run changed files and no check has passed since the last change (B4a). Only
 /// tracks the state: nothing is asked from here.
 #[derive(Default)]
@@ -235,6 +312,11 @@ impl Proof {
     /// Any passing check ran in this run (T6 `Toolchain::unverified`).
     pub(crate) fn passed_at_all(&self) -> bool {
         self.passed_any
+    }
+
+    /// A passing check ran after the last change (the verified-artifact line, #2295).
+    pub(crate) fn checked(&self) -> bool {
+        self.checked
     }
 
     /// A file changed in this run (FH-N2: a closing question after edits is not an open task).
@@ -403,21 +485,24 @@ impl DoneState {
 
     /// One batch, in call order (`calls` and `results` line up): a successful edit or write is a
     /// change; a successful bash call that runs a test or check after the last change proves it.
+    /// A failed command is kept for the next repair (#2295); [`Self::note_artifacts`] then keeps
+    /// the batch's written files.
     pub(crate) fn note_proof(&mut self, calls: &[ToolCall], results: &[CallResult]) {
+        self.failed_command = false;
         for (call, res) in calls.iter().zip(results) {
             if res.is_error {
+                // A failed command is the failure signal; a failed edit or write changed nothing.
+                self.failed_command |= res.tool_name == "bash";
                 continue;
             }
             match res.tool_name.as_str() {
                 "edit" | "write" => {
                     self.proof.changed();
-                    if let Some(path) = serde_json::from_str::<serde_json::Value>(&call.args_raw)
-                        .ok()
-                        .and_then(|args| args.get("path").and_then(|p| p.as_str()).map(str::to_owned))
-                    {
+                    if let Some(path) = written_path(call) {
                         if !self.changed_paths.contains(&path) {
-                            self.changed_paths.push(path);
+                            self.changed_paths.push(path.clone());
                         }
+                        self.written.push(path);
                     }
                 }
                 "read" => {
@@ -451,6 +536,34 @@ impl DoneState {
                 _ => {}
             }
         }
+    }
+
+    /// #2295: with `keep` (the run has `done` checks to run, [`checks_run`]), keep this batch's
+    /// successful `write`/`edit` paths as the verified result a repair names, newest
+    /// [`ARTIFACT_SHOWN`], each file once at its last write. The failure signal and the passing
+    /// check are judged where the check runs ([`Self::verified_artifacts`]).
+    pub(crate) fn note_artifacts(&mut self, keep: bool) {
+        if !keep {
+            self.written.clear();
+            return;
+        }
+        let mut last: Vec<&str> = Vec::new();
+        for path in &self.written {
+            last.retain(|p| *p != path.as_str());
+            last.push(path);
+        }
+        let from = last.len().saturating_sub(ARTIFACT_SHOWN);
+        self.written = last[from..].iter().map(|p| (*p).to_string()).collect();
+    }
+
+    /// #2295: the verified-artifact line for a failed-check repair, only when the batch that
+    /// ran the check also failed a command after writing the file; older writes are the parts a
+    /// check or a formatter may already have rewritten, so they are not claimed here.
+    pub(crate) fn verified_artifacts(&self, cwd: &Path) -> Option<String> {
+        if !self.failed_command || !self.proof.checked() {
+            return None;
+        }
+        artifact_line(cwd, &self.written)
     }
 
     /// Start of a run: remember the tree, so a later `bash` change can be told apart.
@@ -907,11 +1020,17 @@ pub(crate) fn check(
         return None;
     }
     state.rounds = state.rounds.saturating_add(1);
+    // #2295: the batch's verified files open the repair. A later plain turn does not repeat it;
+    // a further batch of tool calls ([`DoneState::note_artifacts`]) replaces it.
+    let artifacts = state.verified_artifacts(&st.cwd);
     let repair = (state.rounds <= MAX_ROUNDS).then(|| {
-        format!(
-            "The project's done checks failed. Fix the problems, then finish.\n\n{}",
-            failed.trim_end()
-        )
+        let failed = failed.trim_end();
+        match artifacts {
+            Some(line) => format!(
+                "The project's done checks failed. Fix the problems, then finish.\n\n{line}\n\n{failed}"
+            ),
+            None => format!("The project's done checks failed. Fix the problems, then finish.\n\n{failed}"),
+        }
     });
     state.observation = Some(CheckObservation::Failed {
         identity: serde_json::json!(failed_checks).to_string(),
@@ -1416,6 +1535,81 @@ mod tests {
         assert!(state.proof.unproven());
     }
 
+    fn write_call(id: &str, path: &str) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            name: "write".to_string(),
+            args_raw: serde_json::json!({ "path": path, "content": "x" }).to_string(),
+        }
+    }
+
+    fn command_call(id: &str, command: &str) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            name: "bash".to_string(),
+            args_raw: serde_json::json!({ "command": command }).to_string(),
+        }
+    }
+
+    fn result(id: &str, name: &str, exit: Option<i64>, is_error: bool) -> CallResult {
+        CallResult {
+            msg: oxa_proto::WireMsg::tool_result(id, "result"),
+            tool_name: name.to_string(),
+            is_error,
+            ui: match exit {
+                Some(exit) => serde_json::json!({ "exit": exit, "timedOut": false }),
+                None => serde_json::Value::Null,
+            },
+            warn: false,
+        }
+    }
+
+    /// One batch that leaves a failure with a verified result: a file written, a command that
+    /// fails, a check that passes over it. `state` then holds what the repair may name.
+    fn failed_batch(state: &mut DoneState, work: &Path, files: &[&str]) {
+        for rel in files {
+            // A path ending in `/` is a folder the run created; anything else is a file.
+            let path = work.join(rel.trim_end_matches('/'));
+            if rel.ends_with('/') {
+                std::fs::create_dir_all(&path).unwrap();
+            } else {
+                std::fs::write(path, "written by this run").unwrap();
+            }
+        }
+        let mut calls: Vec<ToolCall> = files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| write_call(&format!("w{i}"), f))
+            .collect();
+        calls.push(command_call("read", "sqlite3 db .dump"));
+        calls.push(command_call("check", "cargo test"));
+        let mut all: Vec<CallResult> = (0..files.len())
+            .map(|i| result(&format!("w{i}"), "write", None, false))
+            .collect();
+        all.push(result("read", "bash", Some(1), true));
+        all.push(result("check", "bash", Some(0), false));
+        state.note_proof(&calls, &all);
+        state.note_artifacts(true);
+    }
+
+    #[test]
+    fn a_failure_with_a_passing_check_names_the_files_this_batch_wrote() {
+        let env = oxa_fake::TestEnv::new();
+        let work = env.work();
+        let mut state = DoneState::default();
+        failed_batch(&mut state, &work, &["decode.json", "out/"]);
+        let line = state
+            .verified_artifacts(&work)
+            .expect("a verified result is named");
+        assert!(line.starts_with("Not re-derived:"), "{line}");
+        // The folder keeps the trailing slash the call named.
+        assert!(line.contains("decode.json, out/."), "{line}");
+        assert!(
+            line.contains("change only what differs instead of rebuilding"),
+            "{line}"
+        );
+    }
+
     fn bash_call(id: &str, command: &str, exit: i64) -> (ToolCall, CallResult) {
         (
             ToolCall {
@@ -1589,6 +1783,71 @@ mod tests {
             evidence.incomplete,
             "a missing file is a warning, not information"
         );
+    }
+
+    #[test]
+    fn a_failed_batch_without_a_check_or_a_written_file_is_unchanged() {
+        let env = oxa_fake::TestEnv::new();
+        let mut state = DoneState::default();
+        // A written file and a passing check, but no failure: nothing to compare against.
+        failed_batch(&mut state, &env.work(), &["a.txt"]);
+        state.failed_command = false;
+        assert_eq!(state.verified_artifacts(&env.work()), None);
+        // A failure and a written file, but no check passed after it.
+        let mut state = DoneState::default();
+        failed_batch(&mut state, &env.work(), &["b.txt"]);
+        state.proof.checked = false;
+        assert_eq!(state.verified_artifacts(&env.work()), None);
+        // A failure and a check, but this batch wrote no file (an older write is not claimed).
+        let mut state = DoneState::default();
+        state.proof.changed();
+        state.note_proof(
+            &[command_call("c", "cargo test")],
+            &[result("c", "bash", Some(0), false)],
+        );
+        state.note_artifacts(true);
+        assert_eq!(state.written, Vec::<String>::new());
+        assert_eq!(state.verified_artifacts(&env.work()), None);
+        // A run with no `done` checks to run keeps nothing at all.
+        let mut state = DoneState::default();
+        state.proof.changed();
+        state.note_proof(&[write_call("w", "c.txt")], &[result("w", "write", None, false)]);
+        state.note_artifacts(false);
+        state.proof.passed();
+        assert_eq!(state.verified_artifacts(&env.work()), None);
+    }
+
+    #[test]
+    fn a_file_deleted_after_the_check_is_not_offered() {
+        let env = oxa_fake::TestEnv::new();
+        let mut state = DoneState::default();
+        failed_batch(&mut state, &env.work(), &["keep.txt", "gone.txt"]);
+        std::fs::remove_file(env.work().join("gone.txt")).unwrap();
+        let line = state.verified_artifacts(&env.work()).unwrap();
+        assert!(line.contains("keep.txt"), "{line}");
+        assert!(!line.contains("gone.txt"), "{line}");
+    }
+
+    #[test]
+    fn the_path_list_is_bounded_and_never_names_what_is_not_a_relative_path() {
+        let env = oxa_fake::TestEnv::new();
+        let long = format!("{}.txt", "l".repeat(ARTIFACT_PATH_CAP));
+        let files: Vec<&str> = (0..ARTIFACT_SHOWN + 3)
+            .map(|i| if i == 0 { "first.txt" } else { "same.txt" })
+            .collect();
+        let mut state = DoneState::default();
+        failed_batch(&mut state, &env.work(), &files);
+        std::fs::write(env.work().join(&long), "x").unwrap();
+        state.written.push(long.clone());
+        state.written.push("/etc/passwd".to_string());
+        state.written.push("../outside.txt".to_string());
+        let line = state.verified_artifacts(&env.work()).unwrap();
+        assert!(line.contains("first.txt"), "{line}");
+        assert!(!line.contains(&long), "an over-long path is left out");
+        assert!(!line.contains("/etc/passwd"), "{line}");
+        assert!(!line.contains("../outside.txt"), "{line}");
+        // Each file once, at its last write: "same.txt" follows "first.txt" and is kept.
+        assert_eq!(line.matches("same.txt").count(), 1, "{line}");
     }
 
     #[test]

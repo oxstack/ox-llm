@@ -726,6 +726,116 @@ fn fingerprint_does_not_run_repository_filters() {
     );
 }
 
+/// The last user message a request carried (the repair or nudge that opened its turn).
+fn last_user(engine: &ScriptedEngine, request: usize) -> String {
+    engine.requests()[request]
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == oxa_proto::Role::User)
+        .and_then(|m| m.content.clone())
+        .unwrap_or_default()
+}
+
+/// One model reply with tool calls, in call order.
+fn tools_turn(calls: Vec<oxa_proto::ToolCall>) -> ScriptTurn {
+    ScriptTurn {
+        tool_calls: calls,
+        finish: oxa_proto::Finish::ToolCalls,
+        ..ScriptTurn::text("")
+    }
+}
+
+fn call(id: &str, name: &str, args: serde_json::Value) -> oxa_proto::ToolCall {
+    oxa_proto::ToolCall {
+        id: id.to_string(),
+        name: name.to_string(),
+        args_raw: args.to_string(),
+    }
+}
+
+/// #2295: on a signal of failure, the repair names the files the batch wrote and a check passed
+/// over, so the model fixes the difference instead of rebuilding its result.
+#[test]
+fn a_failure_with_a_passing_check_names_the_verified_file_in_the_repair() {
+    let env = TestEnv::new();
+    // A build check that passes in this folder: `make all` is a recognised check.
+    env.write("work/Makefile", "all:\n\t@true\n");
+    let (rec, engine) = run(
+        &env,
+        // The check passes on this turn's write and fails as the end-of-run done check.
+        json!(["test -f done-marker"]),
+        vec![
+            // One batch: write the result, a command fails, a check passes over both.
+            tools_turn(vec![
+                call("w", "write", json!({"path": "answer.json", "content": "decoded"})),
+                call("b", "bash", json!({"command": "false"})),
+                // A build run that succeeds is the check (a bare `true` is not one).
+                call("c", "bash", json!({"command": "make all"})),
+            ]),
+            ScriptTurn::text("done"),
+        ],
+    );
+    let checks = rec.checks();
+    assert_eq!(checks.len(), 1, "{checks:?}");
+    assert!(checks[0].contains("FAILED"), "{checks:?}");
+    // The write batch, the reply after it, then the repair request.
+    assert_eq!(engine.requests().len(), 3);
+    let repair = last_user(&engine, 2);
+    assert!(repair.contains("done checks failed"), "{repair}");
+    assert!(
+        repair.contains(
+            "Not re-derived: these files were written successfully in this run and the check \
+             passed after their last write, so they are this run's verified result: answer.json."
+        ),
+        "the repair names the verified file: {repair}"
+    );
+    assert!(
+        repair.contains("change only what differs instead of rebuilding"),
+        "{repair}"
+    );
+    // The reply after the batch carries no line; the repair carries it once.
+    assert!(!last_user(&engine, 1).contains("Not re-derived"));
+    assert_eq!(last_user(&engine, 2).matches("Not re-derived").count(), 1);
+}
+
+/// A batch with a failing command but no passing check, or one that wrote no file, keeps the
+/// repair exactly as it was.
+#[test]
+fn a_repair_without_a_verified_result_is_unchanged() {
+    // A failing command and no passing check in the batch that wrote the file.
+    let no_check = vec![
+        tools_turn(vec![
+            call("w", "write", json!({"path": "a.txt", "content": "x"})),
+            call("b", "bash", json!({"command": "false"})),
+        ]),
+        ScriptTurn::text("done"),
+    ];
+    // The file was written in an earlier turn; this batch fails a command and passes a check,
+    // but wrote nothing itself, so it has nothing verified to name.
+    let no_write = vec![
+        tools_turn(vec![call("w", "write", json!({"path": "b.txt", "content": "x"}))]),
+        tools_turn(vec![
+            call("b", "bash", json!({"command": "false"})),
+            call("c", "bash", json!({"command": "cargo test"})),
+        ]),
+        ScriptTurn::text("done"),
+    ];
+    for (label, turns) in [("no check", no_check), ("no write", no_write)] {
+        let env = TestEnv::new();
+        let (rec, engine) = run(&env, json!(["exit 1"]), turns);
+        assert!(
+            !rec.checks().is_empty(),
+            "{label}: no done check ran: {:?}",
+            rec.checks()
+        );
+        let last = engine.requests().len() - 1;
+        let repair = last_user(&engine, last);
+        assert!(repair.contains("done checks failed"), "{label}: {repair}");
+        assert!(!repair.contains("Not re-derived"), "{label}: {repair}");
+    }
+}
+
 #[test]
 fn tree_change_made_by_a_check_is_not_blamed_on_the_model() {
     let env = TestEnv::new();

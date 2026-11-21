@@ -1,0 +1,1 @@
+- A run whose `done` check fails after a batch that wrote a file, failed a command and passed a check is told which files it already verified, so it fixes the difference instead of rebuilding its result. Costs nothing when the batch names none.
