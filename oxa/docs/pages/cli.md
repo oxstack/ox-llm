@@ -111,7 +111,6 @@ Commands take the place of the message. They do not start a session.
 | `oxa login chatgpt --experimental [--paste] [--replace]` | explicit owner-only native ChatGPT sign-in |
 | `oxa logout chatgpt` | remove the private ChatGPT token record |
 | `oxa status <session-id\|session-file> [--session-dir <dir>]` | read a saved session's progress and stall signal without contacting an engine |
-| `oxa cache <session-id\|path> [--json]` | [report saved prompt-cache evidence](#prompt-cache-report) for a local or cloud session |
 | `oxa models [--json] [search]` | list the local and cloud models this install can serve — where each runs, its limits and which one is the default; `--json` prints one `oxa_models` object, and a search word filters by place, provider or model name; reads no key and no ledger, runs no model |
 | `oxa send [--follow-up] <session-id> <text\|-> [--wait SECONDS]` | send one message to the session's TUI, RPC owner, headless goal run or a running `oxa work` worker (which takes it at its next turn boundary): a steer for its next tool boundary, or with `--follow-up` a follow-up for the end of its turn; `-` reads standard input. Prints one JSON line `{"id":<message-id>,"outcome":"queued"\|"delivered"\|"not_delivered"}`. With `--wait` the command waits up to that many seconds for the owner to take the file: `delivered` exits 0, `not_delivered` exits 3 |
 | `oxa send <session-id> --retry <message-id> [--wait SECONDS]` | check the same message again without publishing it a second time (same receipt line and exit codes) |
