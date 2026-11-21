@@ -222,7 +222,11 @@ mod tests {
         }
         assert!(html.contains("GitHub Owner · GraphQL</dt><dd>Unknown"));
         assert!(!html.contains("fixture-private-field"));
-        assert!(!html.contains("<form") && !html.contains("<button"));
+        // Read-only view: no forms, and the theme toggle is the document's only
+        // button (chrome that writes localStorage, never server state).
+        assert!(!html.contains("<form"));
+        assert_eq!(html.matches("<button").count(), 1);
+        assert!(html.contains("<button id=theme class=iconbtn"));
     }
 
     #[test]

@@ -1,0 +1,1 @@
+- Lead web: the approved design's tokens and components on every page — styled buttons, textareas, cards, chips and meters, an open-ask count badge that hides at zero, an icon chat button that hides on chat, a desktop rail Chat entry, and a light/dark toggle kept in the browser. The "not connected yet" footer is gone.

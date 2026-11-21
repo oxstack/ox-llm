@@ -5,6 +5,25 @@ Run `oxa lead serve` to serve the read-only board after enabling it in user sett
 The owner must read the final authentication composition before merge or live exposure.
 Chat remains separate work. The one owner-decision mutation is the approval answer below.
 
+## The page
+
+Every page shares one chrome: a sticky top bar with a state dot and a light/dark
+toggle, a fixed bottom navigation, and a floating chat button. The theme choice
+is kept in the browser only, follows the system theme until you pick one, and
+never leaves the device. From 900px wide the bottom bar becomes a left rail with
+a sixth Chat entry, and the floating button hides.
+
+- The Asks tab carries a red count badge only when asks are open. Zero or an
+  unknown count shows no badge; the tab's accessible name says which it is.
+- The active tab is marked with an accent bar and `aria-current=page`. On chat
+  the floating button is absent, because the composer is there.
+- Buttons, textareas, cards, chips and meters follow one token set (colour,
+  type, space, shape) at the top of `lead_page/style.css`; light and dark come
+  from the same tokens. Status colour always pairs with an icon or a word, and
+  an unknown state never renders green.
+- Pages no longer end with a "not connected yet" footer; what chat can do is
+  shown on the chat page itself.
+
 The home page's attention block reports the five stuck-work signals from the board
 log's protected record: main required-check failures, no verified main merge for 45
 minutes, over-age merge-queue membership at the exact PR head, workflow runs queued
