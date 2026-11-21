@@ -21,7 +21,7 @@
 use super::launch::{check_value, child_argv, child_env, valid_name, worktree_argv, WorkerMode, WorkerSpec};
 use super::model_policy::{self, Attempt, ModelPolicy};
 use super::proc::Supervisor;
-use super::registry::{self, WorkerRecord, WorkerState};
+use super::registry::{self, OwnerScope, WorkerRecord, WorkerState};
 use super::resume;
 use oxa_proto::{
     Access, Autonomy, CommandSpec, Exposure, HookPoint, HookReply, Hooks, Host, HostAction, Level, Mode,
@@ -156,8 +156,18 @@ pub struct WorkerCore {
     /// (session id, model) of the parent session, as the host last reported them.
     session: Mutex<(String, String)>,
     host: Mutex<Option<Arc<dyn Host>>>,
+    owner_scope: Option<OwnerScope>,
     /// The parent's table mode as the host last reported it (`None` until known).
     table_mode: Mutex<Option<Mode>>,
+}
+
+impl Drop for WorkerCore {
+    fn drop(&mut self) {
+        // This launcher is one-shot; don't leave a binary copy behind at every run.
+        if self.owner_scope.is_some() && self.pin_error.is_none() && self.supervisor.stop_all().is_ok() {
+            let _ = fs::remove_file(&self.oxa_bin);
+        }
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -198,18 +208,18 @@ pub(super) fn parse_mode(text: &str) -> Option<WorkerMode> {
 
 /// The host tools a worker launch runs outside the sandbox: a `PATH` free of the project (and of
 /// worker worktrees), the project root and the home directory they were resolved against.
-struct HostTools {
-    path: std::ffi::OsString,
-    project: PathBuf,
-    host_project: PathBuf,
-    home: PathBuf,
+pub(super) struct HostTools {
+    pub(super) path: std::ffi::OsString,
+    pub(super) project: PathBuf,
+    pub(super) host_project: PathBuf,
+    pub(super) home: PathBuf,
 }
 
 impl HostTools {
     /// Resolved from the session `cwd` exactly like `oxa work`: the project is the Git root of
     /// the session directory and the `PATH` is trusted against the outermost one, so no
     /// repository-supplied shim is ever found.
-    fn resolve(parent_env: &[(String, String)], cwd: &Path) -> Result<HostTools, String> {
+    pub(super) fn resolve(parent_env: &[(String, String)], cwd: &Path) -> Result<HostTools, String> {
         let value = |name: &str| {
             parent_env
                 .iter()
@@ -238,6 +248,57 @@ impl HostTools {
             host_project: host_project.to_path_buf(),
             home,
         })
+    }
+
+    pub(super) fn owner_scope(&self, sessions_dir: PathBuf, offline: bool) -> Result<OwnerScope, String> {
+        let common = self.git_text(
+            &self.project,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )?;
+        let meta = fs::metadata(common).map_err(|e| format!("cannot inspect repository metadata: {e}"))?;
+        Ok(OwnerScope {
+            repository: self.project.clone(),
+            git_device: meta.dev(),
+            git_inode: meta.ino(),
+            sessions_dir,
+            offline,
+        })
+    }
+
+    pub(super) fn matches_worktree(&self, rec: &WorkerRecord, scope: &OwnerScope) -> bool {
+        let tree = &rec.worktree;
+        if worktree_path(&self.project, &rec.name).as_ref() != Some(tree)
+            || rec.branch != format!("agent/{}", rec.name)
+            || !fs::symlink_metadata(tree.join(".git")).is_ok_and(|m| m.is_file())
+            || !tree.canonicalize().is_ok_and(|path| path == *tree)
+        {
+            return false;
+        }
+        self.git_text(tree, &["rev-parse", "--show-toplevel"])
+            .is_ok_and(|root| Path::new(&root) == tree)
+            && self
+                .git_text(tree, &["rev-parse", "--path-format=absolute", "--git-common-dir"])
+                .ok()
+                .and_then(|path| fs::metadata(path).ok())
+                .is_some_and(|m| m.dev() == scope.git_device && m.ino() == scope.git_inode)
+            && self
+                .git_text(tree, &["symbolic-ref", "--quiet", "HEAD"])
+                .is_ok_and(|branch| branch == format!("refs/heads/{}", rec.branch))
+    }
+
+    fn git_text(&self, cwd: &Path, args: &[&str]) -> Result<String, String> {
+        let git = self
+            .program("git")
+            .ok_or("git was not found in a trusted PATH directory")?;
+        let out = host_git(self, &git, cwd, args)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err("cannot verify worker repository metadata".into());
+        }
+        String::from_utf8(out.stdout)
+            .map(|text| text.trim_end_matches('\n').to_string())
+            .map_err(|_| "worker repository metadata is not UTF-8".into())
     }
 
     fn program(&self, name: &str) -> Option<PathBuf> {
@@ -423,6 +484,14 @@ fn status_path(sessions_dir: &Path, worktree: &Path, session_id: &str) -> Option
     found.pop()
 }
 
+pub(super) fn snapshot(rec: &WorkerRecord, sessions_dir: &Path) -> Option<Value> {
+    let path =
+        status_path(sessions_dir, &rec.worktree, &rec.session_id).unwrap_or_else(|| rec.status_file.clone());
+    crate::status::read_snapshot(&path)
+        .ok()
+        .filter(|status| registry::names_worker(rec, status))
+}
+
 /// The state of a worker from its status file and its process group. The status file is found
 /// under `sessions_dir` (see [`status_path`]); `rec.status_file` is the fallback.
 fn live_state(rec: &WorkerRecord, sessions_dir: &Path) -> WorkerState {
@@ -490,7 +559,11 @@ pub fn bindings(
         .collect())
 }
 
-fn is_live(rec: &WorkerRecord, sessions_dir: &Path) -> bool {
+pub(super) fn is_live(rec: &WorkerRecord, sessions_dir: &Path) -> bool {
+    let sessions_dir = rec
+        .owner_scope
+        .as_ref()
+        .map_or(sessions_dir, |s| s.sessions_dir.as_path());
     matches!(
         live_state(rec, sessions_dir),
         WorkerState::Starting | WorkerState::Working | WorkerState::Idle
@@ -573,8 +646,20 @@ impl WorkerCore {
             gate: Mutex::new(()),
             session: Mutex::new((String::new(), String::new())),
             host: Mutex::new(None),
+            owner_scope: None,
             table_mode: Mutex::new(None),
         }
+    }
+
+    pub(super) fn for_owner(cfg: WorkerConfig, scope: OwnerScope, default_model: String) -> Self {
+        let mut core = Self::new(cfg);
+        core.session = Mutex::new((registry::OWNER_PARENT.into(), default_model));
+        core.owner_scope = Some(scope);
+        core
+    }
+
+    pub(super) fn supervisor(&self) -> &Supervisor {
+        &self.supervisor
     }
 
     fn session(&self) -> (String, String) {
@@ -898,7 +983,12 @@ impl WorkerCore {
 
         // Artifacts are per parent session: two sessions of one agent directory may start a
         // worker with the same name and must not share a goal file or a log.
-        let dir = self.agent_dir.join("workers").join(artifact_slug(&parent));
+        let slug = if self.owner_scope.is_some() {
+            parent.clone()
+        } else {
+            artifact_slug(&parent)
+        };
+        let dir = self.agent_dir.join("workers").join(slug);
         let goal_file = dir.join(format!("{name}.goal.md"));
         if let Err(e) = write_private(&dir, &goal_file, goal) {
             return ToolOutput::error(format!("worker: cannot write the goal file: {e}"));
@@ -980,6 +1070,7 @@ impl WorkerCore {
             verified,
             result: String::new(),
             result_reason: String::new(),
+            owner_scope: self.owner_scope.clone(),
         });
         if let Err(e) = registry::save(&self.agent_dir, &parent, &records) {
             // Not recorded, so nothing would ever stop it: stop it now.
@@ -1185,6 +1276,63 @@ impl WorkerCore {
         Ok(Some(format!("worker {name}: {outcome}")))
     }
 
+    /// Spawn the saved session in its worktree. Both resume callers share the same
+    /// trusted executable, environment, supervisor and narrowing arguments.
+    fn relaunch(
+        &self,
+        rec: &mut WorkerRecord,
+        tools: &HostTools,
+        table_mode: Mode,
+        autonomy: Autonomy,
+    ) -> Result<Option<String>, String> {
+        let (argv, notice) = resume::resume_argv(rec, table_mode, autonomy, &self.parent_scope)?;
+        if !rec.worktree.is_dir() {
+            return Err(format!("worktree {} is gone", rec.worktree.display()));
+        }
+        let env_bin = tools
+            .program("env")
+            .ok_or("env was not found in a trusted PATH directory")?;
+        self.check_bin()?;
+        let env = worker_env(&self.parent_env, oxa_proto::offline(), &tools.path);
+        let mut command = cwd_wrapper(&env_bin, &rec.worktree);
+        command.push(self.oxa_bin.to_string_lossy().into_owned());
+        command.extend(argv);
+        let refs: Vec<&str> = command.iter().map(String::as_str).collect();
+        let pgid = self
+            .supervisor
+            .spawn(&refs, &env, &rec.log_file)
+            .map_err(|e| e.to_string())?;
+        rec.pid = pgid;
+        rec.pgid = pgid;
+        Ok(notice)
+    }
+
+    /// Relaunch just the checked owner record under the caller's registry lease.
+    pub(super) fn resume_owner(
+        &self,
+        records: &mut [WorkerRecord],
+        index: usize,
+        tools: &HostTools,
+        mode: Mode,
+        autonomy: Autonomy,
+    ) -> Result<WorkerRecord, OxaError> {
+        let rec = &mut records[index];
+        let recorded = parse_mode(&rec.mode)
+            .ok_or_else(|| OxaError::new(oxa_proto::codes::INVALID, "invalid recorded worker mode"))?;
+        self.relaunch(rec, tools, mode, autonomy)
+            .map_err(|e| OxaError::new(oxa_proto::codes::IO, format!("cannot resume worker: {e}")))?;
+        rec.mode = super::launch::resume_mode(recorded, mode, autonomy)
+            .as_arg()
+            .into();
+        rec.owner_scope = self.owner_scope.clone();
+        let rec = rec.clone();
+        if let Err(e) = registry::save(&self.agent_dir, registry::OWNER_PARENT, records) {
+            let _ = self.supervisor.stop(rec.pgid);
+            return Err(e);
+        }
+        Ok(rec)
+    }
+
     /// Relaunch each dead, unfinished worker of the parent session (once per session id in this
     /// process): same launch path as `start` (env wrapper, worktree cwd, supervisor), argv from
     /// `resume::resume_argv`. Returns one notice per worker.
@@ -1226,21 +1374,6 @@ impl WorkerCore {
                 ));
                 continue;
             }
-            let (argv, notice) = match resume::resume_argv(rec, table_mode, autonomy, &self.parent_scope) {
-                Ok(v) => v,
-                Err(e) => {
-                    notices.push(format!("worker {}: not resumed: {e}", rec.name));
-                    continue;
-                }
-            };
-            if !rec.worktree.is_dir() {
-                notices.push(format!(
-                    "worker {}: not resumed, worktree {} is gone",
-                    rec.name,
-                    rec.worktree.display()
-                ));
-                continue;
-            }
             let tools = match HostTools::resolve(&self.parent_env, &self.cwd) {
                 Ok(tools) => tools,
                 Err(e) => {
@@ -1248,26 +1381,9 @@ impl WorkerCore {
                     continue;
                 }
             };
-            let Some(env_bin) = tools.program("env") else {
-                notices.push(format!(
-                    "worker {}: not resumed, env was not found in a trusted PATH directory",
-                    rec.name
-                ));
-                continue;
-            };
-            if let Err(e) = self.check_bin() {
-                notices.push(format!("worker {}: not resumed: {e}", rec.name));
-                continue;
-            }
-            let env = worker_env(&self.parent_env, oxa_proto::offline(), &tools.path);
-            let mut command = cwd_wrapper(&env_bin, &rec.worktree);
-            command.push(self.oxa_bin.to_string_lossy().into_owned());
-            command.extend(argv);
-            let refs: Vec<&str> = command.iter().map(String::as_str).collect();
-            match self.supervisor.spawn(&refs, &env, &rec.log_file) {
-                Ok(pgid) => {
-                    rec.pid = pgid;
-                    rec.pgid = pgid;
+            match self.relaunch(rec, &tools, table_mode, autonomy) {
+                Ok(notice) => {
+                    let pgid = rec.pgid;
                     launched.push((
                         pgid,
                         format!(

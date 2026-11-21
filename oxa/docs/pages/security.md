@@ -1,5 +1,10 @@
 # Security
 
+`oxa worker run` is for the owner outside agent tools. The child is unattended and follows the
+same sandbox, offline and approval policy as the worker tool. Resume checks the saved repository,
+branch and session directory, clamps permissions to the current ceiling and never drops a saved
+offline setting. The goal and worker log are private files, not part of the JSON state stream.
+
 oxa is a local agent. The model reads your project, runs commands and writes files on your machine, and it can be steered by any text it reads, including files in the project, web pages and the output of MCP servers. The controls below limit what a model can do and reach. They do not make a model safe to run on untrusted input without supervision, and they do not limit what you do yourself.
 
 The short threat model is in [SECURITY.md](../../SECURITY.md) at the repository root.

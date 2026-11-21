@@ -1,5 +1,8 @@
 # Command line
 
+`oxa worker run` runs one owner-supplied goal in its own Git worktree and writes JSON state lines.
+`oxa worker list --parent kanban --json` reports workers and host load. See [owner worker runs](../work.md#owner-worker-runs).
+
 ```text
 oxa [options] [--] [@files...] [messages...]
 ```

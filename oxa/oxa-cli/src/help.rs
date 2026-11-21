@@ -41,6 +41,21 @@ const BASE: &[Entry] = &[
         example: "oxa cache 20260101-120000-abcd --json",
     },
     Entry {
+        path: &["worker", "run"],
+        summary: "Run a worker in its own Git worktree and stream JSON state",
+        usage: &[
+            "oxa [--offline] worker run [--parent kanban] [--name NAME] [--kind KIND] [--job JOB] --goal-file FILE|- [--model MODEL]",
+            "oxa [--offline] worker run [--parent kanban] --resume [--name NAME | --job JOB]",
+        ],
+        example: "oxa worker run --kind build --job k41 --goal-file -",
+    },
+    Entry {
+        path: &["worker", "list"],
+        summary: "Read owner workers and local host load and free memory as JSON",
+        usage: &["oxa worker list [--parent kanban] [--json]"],
+        example: "oxa worker list --parent kanban --json",
+    },
+    Entry {
         path: &["models"],
         summary: "List the local and cloud models this install can serve, where each runs and which one is the default",
         usage: &["oxa models [--json] [search]"],

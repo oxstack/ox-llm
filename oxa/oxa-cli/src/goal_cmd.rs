@@ -8,17 +8,19 @@ pub(crate) fn load(args: &crate::Args, cwd: &Path) -> Result<Option<Goal>, OxaEr
     args.goal
         .as_ref()
         .map(|file| {
-            let mut bytes = Vec::new();
-            std::fs::File::open(cwd.join(file))
-                .map_err(|e| OxaError::io("read goal file", &e))?
-                .take(65537)
-                .read_to_end(&mut bytes)
-                .map_err(|e| OxaError::io("read goal file", &e))?;
-            let objective = String::from_utf8(bytes)
-                .map_err(|_| OxaError::new(codes::USAGE, "Goal file must be UTF-8 text."))?;
-            from_objective(objective, args.max_time, args.max_tokens)
+            let file = std::fs::File::open(cwd.join(file)).map_err(|e| OxaError::io("read goal file", &e))?;
+            from_objective(read_objective(file)?, args.max_time, args.max_tokens)
         })
         .transpose()
+}
+
+pub(crate) fn read_objective(reader: impl Read) -> Result<String, OxaError> {
+    let mut bytes = Vec::new();
+    reader
+        .take(65537)
+        .read_to_end(&mut bytes)
+        .map_err(|e| OxaError::io("read goal file", &e))?;
+    String::from_utf8(bytes).map_err(|_| OxaError::new(codes::USAGE, "Goal file must be UTF-8 text."))
 }
 
 pub(crate) fn from_objective(

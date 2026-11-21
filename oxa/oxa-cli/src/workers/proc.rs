@@ -59,6 +59,10 @@ enum Msg {
     StopAll {
         reply: Sender<io::Result<()>>,
     },
+    Exited {
+        pgid: u32,
+        reply: Sender<Option<ExitStatus>>,
+    },
 }
 
 /// Handle to the supervisor thread. Dropping it stops every live worker.
@@ -123,6 +127,13 @@ impl Supervisor {
         let (reply, rx) = mpsc::channel();
         self.send(Msg::StopAll { reply })?;
         rx.recv().map_err(|_| gone())?
+    }
+
+    /// Take the exit status once the owned group is empty and its leader is reaped.
+    pub(super) fn exited(&self, pgid: u32) -> io::Result<Option<ExitStatus>> {
+        let (reply, rx) = mpsc::channel();
+        self.send(Msg::Exited { pgid, reply })?;
+        rx.recv().map_err(|_| gone())
     }
 
     fn send(&self, msg: Msg) -> io::Result<()> {
@@ -209,6 +220,9 @@ fn run(rx: Receiver<Msg>, grace: Duration, kill: PathBuf) {
             }
             Ok(Msg::StopAll { reply }) => {
                 let _ = reply.send(table.stop_all());
+            }
+            Ok(Msg::Exited { pgid, reply }) => {
+                let _ = reply.send(table.done.remove(&pgid));
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
@@ -405,6 +419,17 @@ fn signal(kill: &Path, target: &str, sig: &str) -> io::Result<()> {
             "kill -{sig} {target} did not finish within {SIGNAL_DEADLINE:?}"
         ))),
     }
+}
+
+/// Read-only liveness for a recorded worker, including surviving group members.
+pub(super) fn recorded_group_alive(pgid: u32) -> io::Result<bool> {
+    if pgid == 0 || pgid > i32::MAX as u32 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid worker process group",
+        ));
+    }
+    group_alive(pgid)
 }
 
 /// Whether the leader `pid` is still running (not a zombie), from its procfs state.

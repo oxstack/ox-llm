@@ -266,6 +266,16 @@ pub fn run(argv: &[String], env: &Env, io: Stdio) -> i32 {
                     CommandId::Usage => crate::usage_cmd::run(&words.0, &dirs, &cwd, &mut *stdout),
                     CommandId::Cache => crate::cache_cmd::run(&words.0, &dirs, &cwd, env, &mut *stdout),
                     CommandId::PrThreads => crate::pr_threads_cmd::run(&words.0, &dirs, &cwd, &mut *stdout),
+                    CommandId::WorkerRun | CommandId::WorkerList => crate::workers::run_cmd::run(
+                        id,
+                        &words.0,
+                        &dirs,
+                        &cwd,
+                        env,
+                        &mut *stdin,
+                        &mut *stdout,
+                        &mut *stderr,
+                    ),
                     CommandId::Lead
                     | CommandId::LeadServe
                     | CommandId::LeadBoard

@@ -5,8 +5,50 @@ use crate::status::atomic;
 use oxa_proto::OxaError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+
+/// `.kanban` cannot be a session ID. A model tool running in a session named `kanban`
+/// must not share the owner command's registry, work artifacts, or launch lease.
+pub(super) const OWNER_PARENT: &str = ".kanban";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnerScope {
+    pub(super) repository: PathBuf,
+    pub(super) git_device: u64,
+    pub(super) git_inode: u64,
+    pub(super) sessions_dir: PathBuf,
+    pub(super) offline: bool,
+}
+
+/// A short write lease for independent owner launchers sharing one registry. Never
+/// unlink its inode; a waiter may already have it open. Status readers use atomic snapshots.
+pub(super) fn owner_lease(agent_dir: &Path) -> Result<File, OxaError> {
+    let dir = agent_dir.join("workers");
+    fs::create_dir_all(&dir).map_err(|e| io_err("cannot create worker registry directory", e))?;
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .mode(0o600)
+        .open(dir.join(".kanban.lock"))
+        .map_err(|e| io_err("cannot open owner worker lease", e))?;
+    let m = file
+        .metadata()
+        .map_err(|e| io_err("cannot inspect owner worker lease", e))?;
+    // SAFETY: geteuid has no preconditions.
+    if !m.is_file() || m.uid() != unsafe { libc::geteuid() } || m.mode() & 0o077 != 0 || m.nlink() != 1 {
+        return Err(OxaError::new(
+            IO,
+            "owner worker lease must be a private regular file",
+        ));
+    }
+    file.lock()
+        .map_err(|e| io_err("cannot lock owner worker registry", e))?;
+    Ok(file)
+}
 
 pub const CORRUPT: &str = "worker_registry_corrupt";
 const IO: &str = "worker_registry_io";
@@ -47,6 +89,8 @@ pub struct WorkerRecord {
     pub result: String,
     #[serde(default)]
     pub result_reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_scope: Option<OwnerScope>,
 }
 
 impl WorkerRecord {
@@ -80,7 +124,7 @@ fn file_path(agent_dir: &Path, parent_id: &str) -> Result<PathBuf, OxaError> {
         && parent_id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-    if !valid {
+    if !valid && parent_id != OWNER_PARENT {
         return Err(OxaError::new(
             BAD_PARENT,
             format!("invalid parent session id: {parent_id:?}"),

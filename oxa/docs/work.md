@@ -1,5 +1,37 @@
 # Unattended work
 
+## Owner worker runs
+
+From the source Git checkout, pass a goal file or pipe the goal on stdin:
+
+```console
+$ oxa worker run --kind build --job k41 --goal-file - < brief.md
+$ oxa worker list --parent kanban --json
+$ oxa worker run --resume --job k41
+```
+
+`run` uses the worker tool's worktree (`agent/<name>` from the checkout's `HEAD`), model
+policy, and supervisor. The job is the default name; use `--name` for a distinct attempt on
+the same job. `--model` pins the model; without a matching worker policy, the fallback is the
+owner's `defaultModel`. Goals are non-empty UTF-8 text within the existing 64 KiB `--goal`
+limit. The launcher and the list command are for the owner, not for a model to call.
+
+The foreground launcher flushes JSON lines: `started` gives the session ID, branch, model and
+choice; `status` reports phase changes; `finished` gives the outcome, reason and actual exit
+code (128 plus the signal number for a signaled child). Worker output stays in the private log
+beside the goal under `<agent_dir>/workers/.kanban/`. `list` gives one JSON object for the local
+`kanban` namespace, including how many groups are live, 1-minute load, and free memory in bytes
+(`null` when unavailable). Load and memory are observations, not admission decisions.
+
+A foreground interruption shuts down the worker through the supervisor. Resume is explicit,
+for a dead or interrupted worker with a saved session. It restores the same goal and model on
+the saved branch in the same repository and session directory; it does not read a new brief.
+Use `--name` if more than one attempt shares a job. The current permission ceiling can narrow the
+saved mode, and a worker started offline stays offline. To start offline, use `oxa --offline worker
+run …`. The normal unattended sandbox and approval rules still apply. Launch currently uses
+the existing Linux procfs supervisor; no SSH client, automatic dispatch or cross-host credentials
+are involved.
+
 ## Worker mode
 
 `oxa work` workers start in their default mode inside the tool sandbox. When the owner's
