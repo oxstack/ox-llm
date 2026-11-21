@@ -1,5 +1,6 @@
 //! Drive the registered real binary with private local observations and no cloud/GitHub.
 use oxa_fake::TestEnv;
+use oxa_session::SessionStore;
 use std::{
     io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
@@ -886,5 +887,165 @@ fn authorized_durable_asks_reach_the_protected_view_as_a_live_readback() {
         "Tailscale-User-Login: guest@example.invalid\r\n",
     );
     assert!(refused.starts_with("HTTP/1.1 403"));
+    drop(child);
+}
+
+#[test]
+fn chat_page_renders_the_session_as_messages_with_one_composer() {
+    // A real route, a real protected Session file and synthetic entries only: the thread
+    // is bubbles, lead text is Markdown with code, consecutive steps fold into one line,
+    // the owner message form is the only message form, and a credential is masked.
+    let test = TestEnv::new();
+    let dirs = oxa_config::Dirs::under(test.root());
+    std::fs::set_permissions(&dirs.agent_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let uid = std::fs::metadata(test.root()).unwrap().uid();
+    let project = test.work().canonicalize().unwrap();
+    let id = oxa_cli::LeadOwnerBinding::create(&dirs, &project, uid).unwrap();
+    let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    let authority = "lead.example.invalid";
+    let settings = test.write(
+        "home/.oxa/agent/settings.json",
+        &serde_json::json!({"oxa":{"lead":{
+            "sessionId":id,
+            "serve":{"enabled":true,"port":port,"identity":"tailscale","owner_chat":true,
+                "allowed_identities":["owner@example.invalid"],
+                "proxy":{"uid":uid,"authority":authority}}
+        }}})
+        .to_string(),
+    );
+    std::fs::set_permissions(&settings, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let store = oxa_session::FsStore::new(dirs.sessions_dir.clone());
+    let session = store.resolve(&id).unwrap();
+    let now_ms = oxa_proto::time::now_ms();
+    let entry = |id: &str, parent: Option<&str>, ms: u64, body: oxa_proto::EntryBody| oxa_proto::Entry {
+        id: id.into(),
+        parent: parent.map(str::to_owned),
+        ts_ms: now_ms - ms,
+        body,
+    };
+    let message = |wire: oxa_proto::WireMsg| oxa_proto::EntryBody::Msg {
+        wire,
+        parts: Vec::new(),
+        tool: None,
+    };
+    let mut call = oxa_proto::WireMsg::assistant("");
+    call.tool_calls = vec![
+        oxa_proto::ToolCall {
+            id: "call-a".into(),
+            name: "read".into(),
+            args_raw: "{\"path\":\"oxa/src/fixture.rs\"}".into(),
+        },
+        oxa_proto::ToolCall {
+            id: "call-b".into(),
+            name: "bash".into(),
+            args_raw: "{\"command\":\"cargo fmt --check\"}".into(),
+        },
+    ];
+    let entries = [
+        entry(
+            "b1000000",
+            None,
+            90_000,
+            message(oxa_proto::WireMsg::user("Why is the fixture stuck?")),
+        ),
+        entry("b1000001", Some("b1000000"), 80_000, message(call)),
+        entry(
+            "b1000002",
+            Some("b1000001"),
+            70_000,
+            message(oxa_proto::WireMsg::tool_result(
+                "call-a",
+                "token=demo-secret-value sk-abcdefghijklmnopqrstuvwxyz12",
+            )),
+        ),
+        entry(
+            "b1000003",
+            Some("b1000002"),
+            60_000,
+            message(oxa_proto::WireMsg::assistant(
+                "Two findings are open:\n\n- the first\n- the second\n\n```rust\nlet path = \"<fixture>\";\n```",
+            )),
+        ),
+    ];
+    store.append_many(&session, &entries).unwrap();
+    drop(reservation);
+
+    let mut invocation = command(&test);
+    invocation
+        .args(["lead", "serve"])
+        .stdout(Stdio::piped())
+        .stderr(std::fs::File::create(test.root().join("lead-chat.stderr")).unwrap());
+    let mut child = Running(invocation.spawn().unwrap());
+    let stdout = child.0.stdout.take().unwrap();
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let line = line.unwrap_or_default();
+            let found = line.contains("listening");
+            let _ = send.send(line);
+            if found {
+                break;
+            }
+        }
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let line = receive
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .expect("lead serve did not report its listener");
+        if line.contains("listening") {
+            break;
+        }
+    }
+
+    let login = "Tailscale-User-Login: owner@example.invalid\r\n";
+    let page = get(port, "/chat", authority, login);
+    assert!(page.starts_with("HTTP/1.1 200"), "{page}");
+    // One header strip, one thread, one composer, in that order.
+    for part in [
+        "<div class=chat-head>",
+        "<div class=thread",
+        "<div class=composer2>",
+    ] {
+        assert!(page.contains(part), "{part}: {page}");
+    }
+    // Bubbles both ways, Markdown with a list and a code block.
+    assert!(page.contains("class=\"msg me\""), "{page}");
+    assert!(page.contains("class=\"msg lead\""), "{page}");
+    assert!(
+        page.contains("<ul><li>the first</li><li>the second</li></ul>"),
+        "{page}"
+    );
+    assert!(page.contains("<span class=lang>rust</span><pre><code>"), "{page}");
+    // Consecutive steps fold into one details labelled by their own names.
+    assert_eq!(page.matches("<details class=tools").count(), 1, "{page}");
+    assert!(page.contains("steps · read, bash"), "{page}");
+    // Masking precedes markup: the credential never reaches the page.
+    assert!(
+        !page.contains("demo-secret-value") && !page.contains("sk-abcdefghij"),
+        "{page}"
+    );
+    // The one message form is the composer's, with its CSRF field and textarea.
+    assert_eq!(page.matches("method=post action=/chat").count(), 2, "{page}");
+    // The header's session popover lists the owner's running sessions; a dedicated Lead
+    // chat is reached through its own setting, not from that list.
+    assert!(
+        page.contains("<details class=sessions><summary>Sessions"),
+        "{page}"
+    );
+    assert_eq!(page.matches("name=message").count(), 1, "{page}");
+    assert!(page.contains("id=lead-message"), "{page}");
+    // Session identity is not rendered: no session id and no project path.
+    assert!(!page.contains(&id), "{page}");
+    assert!(!page.contains(project.to_str().unwrap()), "{page}");
+    // An unauthorized peer never reads the thread.
+    let refused = get(
+        port,
+        "/chat",
+        authority,
+        "Tailscale-User-Login: guest@example.invalid\r\n",
+    );
+    assert!(refused.starts_with("HTTP/1.1 403"), "{refused}");
     drop(child);
 }

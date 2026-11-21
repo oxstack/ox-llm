@@ -144,14 +144,27 @@ mod tests {
                 serde_json::to_value(action).unwrap(),
             )
         });
+        // The process's reply lands under the thread bubble whose text it repeats, so the
+        // session holds that same message, as a real reply does.
+        let entries = [oxa_proto::Entry {
+            id: "a1b2c3d4".into(),
+            parent: None,
+            ts_ms: 0,
+            body: oxa_proto::EntryBody::Msg {
+                wire: oxa_proto::WireMsg::assistant("Fixture reply"),
+                parts: Vec::new(),
+                tool: None,
+            },
+        }];
         let owner = OwnerChatView {
             csrf: "csrf-example",
             reply: Some(&reply),
             proposal: proposal.as_ref(),
             confirmed,
+            entries: Some(&entries),
         };
         document_for(
-            Page::Chat(Prompt::Status),
+            Page::Chat(Prompt::Status, None),
             &View {
                 owner_chat: Some(owner),
                 ..Default::default()
@@ -172,11 +185,15 @@ mod tests {
     }
 
     fn protected(html: &str) {
-        assert!(!html.contains("<pre>") && !html.contains("&quot;kind&quot;"));
+        assert!(!html.contains("&quot;kind&quot;"));
         assert!(!html.contains("private-session-source") && !html.contains("private-entry-source"));
         assert!(html.contains("name=csrf value=\"csrf-example\""));
         assert!(html.contains("name=proposal_id value=\"proposal-example\""));
-        assert_eq!(html.matches("<button>Confirm proposal</button>").count(), 1);
+        assert_eq!(
+            html.matches("<button class=btn>Confirm proposal</button>")
+                .count(),
+            1
+        );
         assert!(!html.contains(">Undo<") && !html.contains(">Steer now<"));
     }
 

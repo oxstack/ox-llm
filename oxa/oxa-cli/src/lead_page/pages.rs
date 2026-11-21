@@ -19,7 +19,8 @@ pub enum Page {
     Workers,
     Usage,
     Item(u64),
-    Chat(Prompt),
+    /// A fixed snapshot question, with the entry id a `?before=` page opens at.
+    Chat(Prompt, Option<[u8; 8]>),
 }
 
 impl Page {
@@ -33,7 +34,7 @@ impl Page {
             Self::Workers => "Workers",
             Self::Usage => "Usage",
             Self::Item(_) => "Item",
-            Self::Chat(_) => "Chat with lead",
+            Self::Chat(..) => "Chat with lead",
         }
     }
 
@@ -44,7 +45,7 @@ impl Page {
             Self::Board | Self::BoardQuery(_) | Self::Item(_) => "/board",
             Self::Workers => "/workers",
             Self::Usage => "/usage",
-            Self::Chat(_) => "/chat",
+            Self::Chat(..) => "/chat",
         }
     }
 
@@ -60,19 +61,24 @@ impl Page {
         if let Some(query) = path.strip_prefix("/board?") {
             return Some((Self::BoardQuery(Query::parse(query)?), fragment));
         }
-        let prompt = match path {
-            "/chat" | "/chat?prompt=status" => Some(Prompt::Status),
-            "/chat?prompt=workers" => Some(Prompt::Workers),
-            "/chat?prompt=attention" => Some(Prompt::Attention),
-            _ => None,
-        };
-        if let Some(prompt) = prompt {
-            return Some((Self::Chat(prompt), fragment));
+        if let Some(query) = path.strip_prefix("/chat?") {
+            return Some((chat_request(query)?, fragment));
+        }
+        if path == "/chat" {
+            return Some((Self::Chat(Prompt::Status, None), fragment));
         }
         Self::ALL
             .into_iter()
             .find(|page| page.path() == path)
             .map(|page| (page, fragment))
+    }
+
+    /// The entry id a `?before=` page of the thread opens at.
+    pub(super) fn chat_before(&self) -> Option<[u8; 8]> {
+        match self {
+            Self::Chat(_, before) => *before,
+            _ => None,
+        }
     }
 
     pub(super) fn navigation(self, ask_count: Option<usize>) -> String {
@@ -114,7 +120,7 @@ impl Page {
         let _ = write!(
             html,
             "<a class=compose href=/chat aria-label=\"Chat with lead\"{}>✎ Chat</a></nav>",
-            if matches!(self, Self::Chat(_)) {
+            if matches!(self, Self::Chat(..)) {
                 " aria-current=page"
             } else {
                 ""
@@ -130,7 +136,44 @@ impl Page {
             Self::Board | Self::BoardQuery(_) | Self::Item(_) => "M4 4h16v16H4zM9 4v16M4 9h16",
             Self::Workers => "M4 20v-3a4 4 0 0 1 8 0v3M8 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6M14 20v-3a4 4 0 0 1 8 0v3M18 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6",
             Self::Usage => "M4 20V4M4 20h17M8 16v-4M13 16V8M18 16V5",
-            Self::Chat(_) => "M4 20l4-1 12-12-3-3L5 16z",
+            Self::Chat(..) => "M4 20l4-1 12-12-3-3L5 16z",
         }
     }
+}
+
+/// `/chat` query fields: one fixed question and one older-thread bound, no other. An
+/// entry id is checked against the session file's own id alphabet here; the thread
+/// itself looks it up, so an id the session does not hold changes nothing.
+fn chat_request(query: &str) -> Option<Page> {
+    let (mut prompt, mut before) = (None, None);
+    for part in query.split('&').filter(|part| !part.is_empty()) {
+        let (key, value) = part.split_once('=')?;
+        match key {
+            "prompt" if prompt.is_none() => {
+                prompt = Some(match value {
+                    "status" => Prompt::Status,
+                    "workers" => Prompt::Workers,
+                    "attention" => Prompt::Attention,
+                    _ => return None,
+                })
+            }
+            "before" if before.is_none() => {
+                // A session entry id is exactly eight lowercase hex characters; any
+                // other bound is not a page of this thread and is refused here.
+                let bytes = value.as_bytes();
+                if bytes.len() != 8
+                    || !bytes
+                        .iter()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+                {
+                    return None;
+                }
+                let mut bound = [0u8; 8];
+                bound.copy_from_slice(bytes);
+                before = Some(bound);
+            }
+            _ => return None,
+        }
+    }
+    Some(Page::Chat(prompt.unwrap_or(Prompt::Status), before))
 }

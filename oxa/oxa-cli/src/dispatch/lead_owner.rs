@@ -269,6 +269,14 @@ impl LeadOwnerBinding {
         Ok(())
     }
 
+    /// The saved goal and its revision from the same owner-only reading as the thread.
+    /// The observation is a revision and a status only: no worker or model is opened.
+    pub(crate) fn goal(&self) -> Result<Option<(oxa_session::Goal, u64, &SessionRef)>, OxaError> {
+        let entries = self.read_entries()?;
+        Ok(oxa_session::Goal::latest(&entries)?
+            .map(|goal| (goal, oxa_session::Goal::revision(&entries), &self.session)))
+    }
+
     /// Record the owner's exact decision without opening a provider or applying a change.
     pub(crate) fn record_confirmation(&self, proposal_id: &str, proposal: Value) -> Result<(), OxaError> {
         const CONFIRMED: &str = "oxa.lead.proposal_confirmed";

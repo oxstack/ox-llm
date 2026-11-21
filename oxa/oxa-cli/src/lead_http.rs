@@ -572,7 +572,7 @@ fn fixed_target(bytes: &[u8], expected: &str) -> Result<String, Rejected> {
         return Err(Rejected::Csrf);
     }
     let target = format!("/chat?prompt={}", prompt.ok_or(Rejected::Body)?);
-    let (Page::Chat(_), false) = Page::request(&target).ok_or(Rejected::Body)? else {
+    let (Page::Chat(..), false) = Page::request(&target).ok_or(Rejected::Body)? else {
         return Err(Rejected::Body);
     };
     Ok(target)

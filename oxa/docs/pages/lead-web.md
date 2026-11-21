@@ -16,6 +16,32 @@ durable Lead Session on every render, with their original revisions, through the
 registered owner-bound caller; an unauthorized or absent session leaves that source
 unavailable rather than quietly empty.
 
+## Chat
+
+`/chat` is one header strip, one bubble thread and one composer at the bottom of the
+screen. The header shows the Lead Session, whether it is running, its last reported
+token count and the owner goal's recorded state. The session list is a popover on
+that line; another session is chosen in `oxa.lead.sessionId`, not on the page.
+
+Owner messages sit on the right and lead messages on the left. Lead text renders as
+Markdown: paragraphs, lists, bold and italic, inline code, fenced code and links. Code
+keeps its line breaks and scrolls inside its block. Raw HTML in a reply is shown as
+text, and a link keeps its target only when it is a path on this page or a web page;
+`#17` opens the item page. Consecutive tool steps fold into one "N steps · bash ×2,
+read · 12 s" line that opens on tap. A shell command shows its executable words with
+credentials masked, the same masking the approval panel uses. A failed result is
+marked failed.
+
+The thread shows the session's newest 30 messages; "Show earlier messages" opens the
+page before them. The composer grows with the text, Enter sends on a desktop keyboard
+and Shift+Enter adds a line. Sending still posts the same same-origin, CSRF-checked form
+to `/chat`; nothing on this page answers, approves, steers or sends without it. Age is
+read from the entries' own timestamps, so "running" means an entry arrived in the last
+three minutes, not that a turn is still alive.
+
+With no owner chat, the composer says so in words and there is no message form. When
+the session's entries cannot be read, its popover says that instead.
+
 Optional user setting `oxa.lead.serve.fixed_prompts` defaults to false.
 It enables no-JS, same-origin/CSRF-protected fixed questions at zero model tokens.
 Private situation data needs browser proof separate from tool UIDs; absent inputs stay unavailable.
