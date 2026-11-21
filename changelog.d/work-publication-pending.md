@@ -1,0 +1,1 @@
+`oxa work` reports accepted work whose publication left no useful receipt at its saved head as `publication_pending` (exit code 3), naming the phase and age, and `oxa work status` marks the row pending instead of done.

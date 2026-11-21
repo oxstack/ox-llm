@@ -123,7 +123,12 @@ fn branch_attempts(root: PathBuf) {
     let mut records = vec![];
     for ordinal in [1, 2] {
         let record = run_native(&project, &policy, &admission(ordinal, 7, BRANCH, None), "main");
-        assert_eq!(record.outcome, oxa_work::Outcome::Done, "{record:?}");
+        // Locally verified, with publication held for the runner: never reported done (#2304).
+        assert_eq!(
+            record.outcome,
+            oxa_work::Outcome::PublicationPending,
+            "{record:?}"
+        );
         records.push(record);
     }
     assert_ne!(records[0].id, records[1].id);
@@ -159,7 +164,7 @@ fn reviewed_attempts(root: PathBuf) {
         &admission(1, 42, PR_BRANCH, Some(&first_head)),
         &base,
     );
-    assert_eq!(first.outcome, oxa_work::Outcome::Done, "{first:?}");
+    assert_eq!(first.outcome, oxa_work::Outcome::PublicationPending, "{first:?}");
     // The reviewed head moves with the saved work; the pull request number does not.
     let second_head = tip(&project);
     assert_ne!(second_head, first_head);
@@ -169,7 +174,11 @@ fn reviewed_attempts(root: PathBuf) {
         &admission(2, 42, PR_BRANCH, Some(&second_head)),
         &base,
     );
-    assert_eq!(second.outcome, oxa_work::Outcome::Done, "{second:?}");
+    assert_eq!(
+        second.outcome,
+        oxa_work::Outcome::PublicationPending,
+        "{second:?}"
+    );
     assert_ne!(first.id, second.id);
     assert_ne!(first.worktree, second.worktree);
     assert!(first.worktree.join("first.txt").exists());

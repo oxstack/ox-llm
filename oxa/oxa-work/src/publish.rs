@@ -975,7 +975,11 @@ fn publish_locked(
 ) -> Result<Record> {
     let (mut writer, mut value) = action_context(locked, observer)?;
     let (task, policy, lock) = (locked.task, locked.policy, &locked.lock);
-    let accepted = value.record.acceptance_outcome.unwrap_or(value.record.outcome);
+    let accepted = match value.record.acceptance_outcome.unwrap_or(value.record.outcome) {
+        // Accepted work whose publication is still owed: only its receipt is missing (#2304).
+        Outcome::PublicationPending => Outcome::Done,
+        accepted => accepted,
+    };
     if !super::completed_execution(value.record.step)
         || !matches!(accepted, Outcome::Done | Outcome::NothingToDo)
     {

@@ -245,9 +245,14 @@ pub(crate) fn run(
                         let age = publication
                             .age_secs
                             .map_or_else(|| "age unknown".to_owned(), |s| format!("{s}s since save"));
+                        let pending = if row.record.outcome == oxa_work::Outcome::PublicationPending {
+                            " (pending publication, not done)"
+                        } else {
+                            ""
+                        };
                         writeln!(
                             out,
-                            "  {} {}: {} ({age}). {}",
+                            "  {} {}: {}{pending} ({age}). {}",
                             row.record.branch,
                             row.record.head_sha.as_deref().unwrap_or_default(),
                             publication.phase,
@@ -493,7 +498,11 @@ pub(crate) fn run(
                 Ok(plan) => context.planned(&plan)?,
                 Err(record) => *record,
             };
-            if matches!(
+            // Accepted work still owing its publication receipt is not success for a caller
+            // that reads only the exit code (#2304); it is not a failure either.
+            if record.outcome == oxa_work::Outcome::PublicationPending && code == 0 {
+                code = 3;
+            } else if matches!(
                 record.outcome,
                 oxa_work::Outcome::Red
                     | oxa_work::Outcome::Blocked

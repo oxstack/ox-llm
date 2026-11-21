@@ -41,7 +41,8 @@ pub mod shadow;
 mod state;
 mod status;
 pub use status::{
-    status, task_usage, task_usage_for_binding, Liveness, PublicationStatus, Status, TaskUsage,
+    publication_pending, status, task_usage, task_usage_for_binding, Liveness, PublicationStatus, Status,
+    TaskUsage,
 };
 mod tree;
 pub use state::{CheckpointKind, CheckpointObserver, Step};
@@ -113,6 +114,9 @@ pub enum Outcome {
     Interrupted,
     Done,
     NothingToDo,
+    /// Accepted work whose publication action left no useful exact-head receipt (#2304).
+    /// Not a failure and not a publishable verdict: the next step is publication.
+    PublicationPending,
     Red,
     Blocked,
     /// The checks could not run (toolchain missing, timeout, unreadable evidence), so the
@@ -178,6 +182,15 @@ impl Record {
             self.outcome,
             Outcome::Red | Outcome::Blocked | Outcome::Interrupted | Outcome::Unverified
         ) || self.reports.iter().any(|report| report.disposition == "failed")
+    }
+
+    /// The saved work was accepted: done, nothing to do, or accepted with its publication still
+    /// owed. Reading it back (status, a publication retry) is not a new execution.
+    pub fn work_accepted(&self) -> bool {
+        matches!(
+            self.outcome,
+            Outcome::Done | Outcome::NothingToDo | Outcome::PublicationPending
+        )
     }
 }
 
@@ -287,7 +300,7 @@ pub fn plan_task_for_actions(
     plan_task_mode(repo, task, policy, rerun, true, false)
 }
 
-fn completed_execution(step: Step) -> bool {
+pub(crate) fn completed_execution(step: Step) -> bool {
     matches!(step, Step::Finished | Step::Publishing | Step::Reporting)
 }
 
@@ -307,8 +320,7 @@ fn plan_task_mode(
         return Err("task specification changed; use a new task id".into());
     }
     if !(rerun && completed_execution(saved.record.step))
-        && (saved.record.step != Step::Finished
-            || (!rerun && (actions || matches!(saved.record.outcome, Outcome::Done | Outcome::NothingToDo))))
+        && (saved.record.step != Step::Finished || (!rerun && (actions || saved.record.work_accepted())))
     {
         let execution = saved.execution.ok_or("missing task execution checkpoint")?;
         if saved.record.base_sha.as_deref() != Some(&execution.base) {
@@ -1725,7 +1737,7 @@ fn run_locked(
             return Ok(old.record);
         }
         if completed_execution(old.record.step) {
-            if !rerun && matches!(old.record.outcome, Outcome::Done | Outcome::NothingToDo) {
+            if !rerun && old.record.work_accepted() {
                 if old.record.checks.is_empty() {
                     let mut old = old;
                     old.record.outcome = Outcome::Unverified;
@@ -1821,7 +1833,10 @@ fn run_locked(
                 .map_err(RunError::Checkpoint)?;
             if let Err(error) = execute::save_work(&root, binary, task, &policy, lock_file, &mut state.record)
             {
-                if !matches!(state.record.outcome, Outcome::Interrupted | Outcome::Unverified) {
+                if !matches!(
+                    state.record.outcome,
+                    Outcome::Interrupted | Outcome::Unverified | Outcome::PublicationPending
+                ) {
                     state.record.outcome = Outcome::Blocked;
                 }
                 if !state.record.detail.is_empty() {
@@ -1960,10 +1975,45 @@ fn run_locked(
     if planned.native && state.record.outcome == Outcome::Done && state.record.detail.is_empty() {
         state.record.detail = "local verified; publication held".into();
     }
+    // #2304: a run whose own publication step (lane acceptance, or the native hold) leaves no
+    // useful exact-head receipt is pending, not done. A lane task without lane CI performs no
+    // publication step here (#1376 holds it), and a plain task publishes only on request.
+    let step = publication_step(state.task.lane_ci, state.record.lane.is_some(), planned.native);
+    // A publication step still owed is not an unspecified end: the accepted verdict is kept
+    // beside it. Every outcome the loop can still change (a save recovery, a lane repair that
+    // turns red) was settled above, so only a settled success can become pending here.
+    let pending = step.and_then(|step| {
+        matches!(state.record.outcome, Outcome::Done | Outcome::NothingToDo)
+            .then(|| {
+                crate::PublicationStatus::summary(&state.record, state::now_ms())
+                    .map(|pending| format!("{step}: {pending}"))
+            })
+            .flatten()
+    });
+    if let Some(pending) = pending {
+        state.record.acceptance_outcome = Some(state.record.outcome);
+        state.record.outcome = Outcome::PublicationPending;
+        state.record.detail = if state.record.detail.is_empty() {
+            pending
+        } else {
+            format!("{}; {pending}", state.record.detail)
+        };
+    }
     writer
         .save(&mut state, Step::Finished, observer)
         .map_err(RunError::Checkpoint)?;
     Ok(state.record)
+}
+
+/// Whether this run performed a publication step whose receipt the result owes.
+fn publication_step(lane_ci: bool, lane_attempted: bool, native: bool) -> Option<&'static str> {
+    if lane_ci && lane_attempted {
+        Some("lane acceptance")
+    } else if native {
+        Some("publication held for the runner")
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

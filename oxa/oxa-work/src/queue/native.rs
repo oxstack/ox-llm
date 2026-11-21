@@ -138,7 +138,11 @@ fn finished(record: &Record) -> bool {
         && record.checkpoint_revision > 0
         && matches!(
             record.outcome,
-            Outcome::Done | Outcome::NothingToDo | Outcome::Red | Outcome::Unverified
+            Outcome::Done
+                | Outcome::NothingToDo
+                | Outcome::PublicationPending
+                | Outcome::Red
+                | Outcome::Unverified
         )
 }
 

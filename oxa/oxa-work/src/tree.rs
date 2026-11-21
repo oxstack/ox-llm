@@ -462,7 +462,7 @@ fn release_prior_branch(
     let prior_kind = match lineage {
         Lineage::Review { number, .. } => {
             prior.task.reviewed_source().map(|(prior_number, _)| prior_number) == Some(number)
-                && matches!(prior.record.outcome, Outcome::Done | Outcome::NothingToDo)
+                && prior.record.work_accepted()
         }
         // A retry follows any finished attempt; its saved work is on the branch.
         Lineage::Native => native_attempt(&prior.task),

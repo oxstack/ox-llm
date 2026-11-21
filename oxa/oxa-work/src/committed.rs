@@ -58,10 +58,7 @@ pub fn verify_saved_task(repo: &Path, binary: &Path, policy: &RunPolicy, id: &st
     lock.try_lock().map_err(|_| "task is already running")?;
     let saved = state::load(&policy.storage.join(format!("{id}.json")))?;
     let record = &saved.record;
-    if saved.task.id != id
-        || record.step != Step::Finished
-        || !matches!(record.outcome, Outcome::Done | Outcome::NothingToDo)
-    {
+    if saved.task.id != id || record.step != Step::Finished || !record.work_accepted() {
         return Err("only finished successful work can be verified for publication".into());
     }
     require_lane_evidence(&saved)?;

@@ -135,14 +135,43 @@ fn command(env: &TestEnv, path: &str, args: &[&str]) -> std::process::Output {
 }
 
 #[test]
-fn a_green_lane_run_at_the_pushed_head_is_done() {
+fn lane_accepted_work_without_a_pr_receipt_is_reported_pending_not_done() {
+    let env = TestEnv::new();
+    setup_lane(&env, r#"["true"]"#);
+    lane_task(&env);
+    let path = configure(&env);
+    env.write("home/lane-pass", "");
+    run_lane(&env, edits(), path.clone());
+    // Reading the saved result back composes what a caller sees: pending, not done, exit 3.
+    let listed = command(&env, &path, &["work", "../tasks.json"]);
+    assert_eq!(listed.status.code(), Some(3), "{listed:?}");
+    let record: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(record["outcome"], "publication_pending", "{record}");
+    // The lane run is the evidence behind the acceptance the pending receipt belongs to.
+    assert_eq!(record["lane"]["conclusion"], "success", "{record}");
+    assert_eq!(record["lane"]["head"], record["head_sha"], "{record}");
+    let status = command(&env, &path, &["work", "status"]);
+    let text = String::from_utf8(status.stdout).unwrap();
+    assert!(text.contains("pending publication, not done"), "{text}");
+    assert!(text.contains("branch_without_pr_receipt"), "{text}");
+}
+
+#[test]
+fn a_green_lane_run_at_the_pushed_head_owes_its_pr_receipt() {
     let env = TestEnv::new();
     setup_lane(&env, r#"["true"]"#);
     lane_task(&env);
     let path = configure(&env);
     env.write("home/lane-pass", "");
     let record = run_lane(&env, edits(), path);
-    assert_eq!(record["outcome"], "done", "{record}");
+    // The lane push delivered the exact head, but nothing opened its PR: accepted work with
+    // publication still owed, never reported as done (#2304).
+    assert_eq!(record["outcome"], "publication_pending", "{record}");
+    let detail = record["detail"].as_str().unwrap();
+    assert!(
+        detail.starts_with("lane acceptance: publication pending: branch_without_pr_receipt ("),
+        "{detail}"
+    );
     assert_eq!(record["step"], "finished");
     assert_eq!(record["lane"]["conclusion"], "success", "{record}");
     assert_eq!(record["lane"]["head"], record["head_sha"], "{record}");
@@ -329,7 +358,9 @@ esac
         fs::set_permissions(exe, fs::Permissions::from_mode(0o755)).unwrap();
     }
     let record = run_lane(&env, edits(), path.clone());
-    assert_eq!(record["outcome"], "done", "{record}");
+    // Green lane evidence at the pushed head; publication still owes its PR receipt (#2304).
+    assert_eq!(record["outcome"], "publication_pending", "{record}");
+    assert_eq!(record["lane"]["conclusion"], "success", "{record}");
     assert_eq!(origin_head(&env), record["head_sha"].as_str().unwrap());
     let push_count = || {
         fs::read_to_string(env.home().join("push-generations"))
@@ -500,7 +531,8 @@ fn publication_refuses_a_lane_task_without_green_evidence() {
     let path = configure(&env);
     env.write("home/lane-pass", "");
     let record = run_lane(&env, edits(), path.clone());
-    assert_eq!(record["outcome"], "done", "{record}");
+    // Green lane evidence, PR receipt still owed by the authorised publication path (#2304).
+    assert_eq!(record["outcome"], "publication_pending", "{record}");
     // Remove the lane observation from the saved record: a saved local pass is
     // not publication evidence for a lane task.
     let path_to_state = state_path(&env);
@@ -620,7 +652,10 @@ fn an_agent_process_can_use_the_owner_confirm_broker() {
     assert!(out.status.success(), "{events}\n{stderr}");
     let record: serde_json::Value = serde_json::from_slice(&fs::read(&record_path).unwrap_or_default())
         .unwrap_or_else(|error| panic!("{error}: {events}\n{stderr}"));
-    assert_eq!(record["outcome"], "done", "{record}\n{events}\n{stderr}");
+    assert_eq!(
+        record["outcome"], "publication_pending",
+        "{record}\n{events}\n{stderr}"
+    );
     assert_eq!(
         events.matches("owner confirm yes (yolo)").count(),
         1,
@@ -675,8 +710,8 @@ fn a_queue_launch_approves_lane_tasks_from_the_owner_environment() {
         .find(|row| row["event"] == "task")
         .expect("one task event");
     assert_eq!(
-        task["outcome"], "done",
-        "the queue's approved lane task should complete: {task}"
+        task["outcome"], "publication_pending",
+        "the queue's approved lane task should be accepted with its PR receipt owed: {task}"
     );
     assert!(
         !task["detail"]
@@ -823,7 +858,7 @@ fn rust_unverified_work_collects_lane_evidence_and_becomes_done_on_green() {
         ],
         path,
     );
-    assert_eq!(record["outcome"], "done", "{record}");
+    assert_eq!(record["outcome"], "publication_pending", "{record}");
     assert_eq!(record["lane"]["conclusion"], "success", "{record}");
     assert_eq!(record["lane"]["head"], record["head_sha"], "{record}");
     assert_eq!(origin_head(&env), record["head_sha"].as_str().unwrap());

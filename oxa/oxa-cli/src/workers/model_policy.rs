@@ -84,7 +84,8 @@ pub fn check_reason(text: &str) -> Result<String, String> {
 }
 
 /// Whether an earlier worker counts as a failed attempt: the caller's recorded result wins; else a
-/// dead process, or a finished outcome other than done / nothing_to_do. A stop does not count,
+/// dead process, or a finished outcome other than done / nothing_to_do / publication_pending. A
+/// stop does not count,
 /// whether the record is marked `stopped` (the child may have written `finished / interrupted`
 /// since, which wins over the marker in the state) or the outcome is `interrupted` (a SIGINT from a
 /// stop or the parent's shutdown: a resume case, not a model result).
@@ -96,7 +97,11 @@ pub fn failed(result: &str, state: &WorkerState, stopped: bool) -> bool {
         _ => match state {
             WorkerState::Dead => true,
             WorkerState::Finished(outcome) => {
-                !matches!(outcome.as_str(), "done" | "nothing_to_do" | "interrupted")
+                // A pending publication is accepted work awaiting its push, not a failed attempt.
+                !matches!(
+                    outcome.as_str(),
+                    "done" | "nothing_to_do" | "publication_pending" | "interrupted"
+                )
             }
             _ => false,
         },
