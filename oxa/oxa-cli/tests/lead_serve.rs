@@ -888,3 +888,329 @@ fn authorized_durable_asks_reach_the_protected_view_as_a_live_readback() {
     assert!(refused.starts_with("HTTP/1.1 403"));
     drop(child);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Synthetic lead frames (#2349). Six native fixture frames under tests/fixtures/lead/ render
+// through the real routes: healthy, needs_you, alarm, stale, partial and first_run. The files
+// hold the native wire formats (one Reader sample record, one runner situation document) at a
+// synthetic reference epoch; `with_frame` rebases their timestamps so each frame renders the
+// age it declares. Assertions are behavioural: rows survive staleness, every gap is explicit,
+// an absent source never reads as healthy or alarming, and no frame fabricates data.
+// ---------------------------------------------------------------------------------------------
+
+fn fixture(name: &str) -> serde_json::Value {
+    let text = match name {
+        "healthy" => include_str!("fixtures/lead/healthy.json"),
+        "needs_you" => include_str!("fixtures/lead/needs_you.json"),
+        "alarm" => include_str!("fixtures/lead/alarm.json"),
+        "stale" => include_str!("fixtures/lead/stale.json"),
+        "partial" => include_str!("fixtures/lead/partial.json"),
+        "first_run" => include_str!("fixtures/lead/first_run.json"),
+        other => panic!("unknown lead fixture {other}"),
+    };
+    serde_json::from_str(text).expect("a lead fixture is valid JSON")
+}
+
+/// The native timestamp fields of a Reader sample and a runner situation. Shifting these (and
+/// only these) rebases a frame without touching any identifier, count or policy field. ISO
+/// fields keep the whole-second UTC form the parsers accept.
+fn shift_timestamps(value: &mut serde_json::Value, shift: i64) {
+    use serde_json::Value;
+    const SECONDS: &[&str] = &[
+        "observed_at",
+        "expires_at",
+        "claimed_at",
+        "enqueued_at",
+        "resets_at",
+        "until",
+        "oldest_at",
+    ];
+    const MILLIS: &[&str] = &["at_ms", "merged_at_ms", "started_ms"];
+    const ISO: &[&str] = &["mergedAt", "updated_at"];
+    match value {
+        Value::Object(map) => {
+            for (key, inner) in map.iter_mut() {
+                if SECONDS.contains(&key.as_str()) {
+                    if let Some(number) = inner.as_u64() {
+                        *inner = Value::from((number as i64 + shift) as u64);
+                    }
+                } else if MILLIS.contains(&key.as_str()) {
+                    if let Some(number) = inner.as_u64() {
+                        *inner = Value::from((number as i64 + shift * 1000) as u64);
+                    }
+                } else if ISO.contains(&key.as_str()) {
+                    if let Some(text) = inner.as_str() {
+                        let secs = oxa_session::parse_utc_seconds(text)
+                            .expect("a fixture ISO timestamp is whole-second UTC");
+                        let shifted = (secs as i64 + shift) as u64;
+                        *inner = Value::from(format!("{}Z", &oxa_session::iso_from_ms(shifted * 1000)[..19]));
+                    }
+                } else {
+                    shift_timestamps(inner, shift);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                shift_timestamps(item, shift);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Serve one synthetic frame through the real binary and routes. The closure receives the
+/// port, the authority and the private input directory (its `board.jsonl` may be absent, as
+/// the first_run frame declares).
+fn with_frame(name: &str, run: impl FnOnce(u16, &str, &std::path::Path)) {
+    let mut frame = fixture(name);
+    let test = TestEnv::new();
+    std::fs::set_permissions(test.agent_dir(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    test.write(
+        "home/.oxa/agent/settings.json",
+        &serde_json::json!({"oxa":{"lead":{"serve":{
+            "enabled":true,"fixed_prompts":true,"port":port
+        }}}})
+        .to_string(),
+    );
+    let directory = test.root().join("inputs");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let board = directory.join("board.jsonl");
+    if !frame["board_record"].is_null() {
+        let age = frame["age_secs"]
+            .as_u64()
+            .expect("a frame declares its board age");
+        let observed = frame["board_record"]["observed_at"].as_u64().unwrap();
+        let record = &mut frame["board_record"];
+        shift_timestamps(record, now as i64 - observed as i64 - age as i64);
+        let mut line = serde_json::to_string(record).unwrap();
+        line.push('\n');
+        std::fs::write(&board, line).unwrap();
+        std::fs::set_permissions(&board, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let situation = if frame["situation"].is_null() {
+        None
+    } else {
+        let age = frame["situation_age_secs"].as_u64().unwrap();
+        let at_ms = frame["situation"]["data"]["at_ms"].as_u64().unwrap();
+        let document = &mut frame["situation"];
+        shift_timestamps(document, now as i64 - (at_ms / 1000) as i64 - age as i64);
+        // The frame must be a native situation document, not an approximation of one.
+        let bytes = serde_json::to_vec(document).unwrap();
+        let snapshot =
+            oxa_proto::work::Snapshot::from_json(&bytes).expect("a fixture situation decodes natively");
+        let path = directory.join("situation.json");
+        std::fs::write(&path, snapshot.to_json().unwrap()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        Some(path)
+    };
+    drop(reservation);
+    let _server = start_with_situation(&test, &board, situation.as_deref());
+    let authority = format!("127.0.0.1:{port}");
+    run(port, &authority, &directory);
+}
+
+/// Every page and its fragment render for an authorized caller, and a wrong Host is refused.
+fn frame_pages_render(port: u16, authority: &str) {
+    for (path, title) in [
+        ("/", "Status"),
+        ("/asks", "Asks"),
+        ("/board", "Board"),
+        ("/workers", "Workers"),
+        ("/usage", "Usage"),
+        ("/chat", "Chat with lead"),
+    ] {
+        for fragment in [false, true] {
+            let path = if fragment {
+                format!("{path}?fragment=1")
+            } else {
+                path.into()
+            };
+            let response = get(port, &path, authority, "");
+            assert!(response.starts_with("HTTP/1.1 200"), "{path}");
+            assert!(response.contains(&format!(">{title}</h1>")), "{path}");
+            assert_eq!(response.contains("<!doctype html>"), !fragment, "{path}");
+        }
+        assert!(get(port, path, "attacker.invalid", "").starts_with("HTTP/1.1 403"));
+    }
+}
+
+#[test]
+fn lead_fixtures_are_native_records_with_synthetic_identities() {
+    for name in ["healthy", "needs_you", "alarm", "stale", "partial", "first_run"] {
+        let frame = fixture(name);
+        if !frame["board_record"].is_null() {
+            let record = &frame["board_record"];
+            assert_eq!(record["schema_version"], serde_json::json!(1), "{name}");
+            let board: oxa_work::board::Board =
+                serde_json::from_value(record["board"].clone()).expect("a native shared board");
+            assert_eq!(
+                board.observed_at,
+                record["observed_at"].as_u64().unwrap(),
+                "{name}"
+            );
+            assert!(!board.entries.is_empty(), "{name}");
+            for entry in &board.entries {
+                assert_eq!(entry.head.len(), 40, "{name}");
+                assert!(
+                    entry
+                        .head
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                    "{name}"
+                );
+            }
+        }
+        if !frame["situation"].is_null() {
+            let bytes = serde_json::to_vec(&frame["situation"]).unwrap();
+            oxa_proto::work::Snapshot::from_json(&bytes).expect("a native runner situation");
+        }
+    }
+}
+
+#[test]
+fn healthy_frame_renders_quiet_pages_from_observed_sources() {
+    with_frame("healthy", |port, authority, _inputs| {
+        frame_pages_render(port, authority);
+        let home = get(port, "/", authority, "");
+        // Every alarm source is observed and quiet: a healthy system renders no attention block
+        // and no stale notice.
+        assert!(!home.contains("id=attention"), "{home}");
+        assert!(!home.contains("Board observation needs refreshing"), "{home}");
+        let board = get(port, "/board", authority, "");
+        assert!(board.contains("GitHub snapshot") && !board.contains("Stale snapshot"));
+        for number in [101, 102, 103] {
+            assert!(board.contains(&format!("#{}", number)), "{number}");
+        }
+        assert!(board.contains("Showing 3 of 3 items"));
+        assert!(board.contains("fixture-worker"));
+        assert!(board.contains("1. PR #101"));
+        let usage = get(port, "/usage", authority, "");
+        assert!(usage.contains("4980 of 5000 remaining"));
+        assert!(usage.contains("aria-label=\"GitHub App · REST core remaining\""));
+        let workers = get(port, "/workers", authority, "");
+        assert!(workers.contains("task-103") && workers.contains("Busy at observation"));
+        assert!(workers.contains("Runner facts · sequence 7"));
+        // Local-mode chat is the real no-JS fixed-prompt form, not a fabricated transcript.
+        assert!(get(port, "/chat", authority, "").contains("method=post action=/chat"));
+    });
+}
+
+#[test]
+fn needs_you_frame_asks_for_decisions_without_alarming() {
+    with_frame("needs_you", |port, authority, _inputs| {
+        frame_pages_render(port, authority);
+        let home = get(port, "/", authority, "");
+        assert!(home.contains("id=attention role=status"));
+        assert!(home.contains("Needs you"));
+        assert!(home.contains("Unanswered owner decisions (2)"));
+        assert!(!home.contains("role=alert"));
+        let asks = get(port, "/asks", authority, "");
+        assert!(asks.contains("Raise the merge target to 12 per hour?"));
+        assert!(asks.contains("Accept the removal rationale on PR #103?"));
+        assert!(asks.contains("Ask ask-103 · PR #103"));
+        // The board itself stays normal while decisions wait.
+        let board = get(port, "/board", authority, "");
+        assert!(board.contains("#103") && board.contains("#104"));
+    });
+}
+
+#[test]
+fn alarm_frame_names_every_firing_source() {
+    with_frame("alarm", |port, authority, _inputs| {
+        frame_pages_render(port, authority);
+        let home = get(port, "/", authority, "");
+        assert!(home.contains("id=attention role=alert"));
+        assert!(home.contains("Checks on main are failing."));
+        assert!(home.contains("No PR merged into main for 45 minutes or more at the last observation."));
+        assert!(home.contains("PR #102 has waited too long in the merge queue"));
+        assert!(home.contains("Run 9002"));
+        let workers = get(port, "/workers", authority, "");
+        assert!(workers.contains("task-102") && workers.contains("Stall reported"));
+        // An alarm never hides the board rows it is about.
+        let board = get(port, "/board", authority, "");
+        assert!(board.contains("#102") && board.contains("#105"));
+    });
+}
+
+#[test]
+fn stale_frame_keeps_its_rows_and_offers_a_retry() {
+    with_frame("stale", |port, authority, _inputs| {
+        frame_pages_render(port, authority);
+        let board = get(port, "/board", authority, "");
+        assert!(board.contains("Stale snapshot") && !board.contains("GitHub snapshot"));
+        for number in [101, 102, 103] {
+            assert!(board.contains(&format!("#{}", number)), "{number}");
+        }
+        let home = get(port, "/", authority, "");
+        assert!(home.contains("<h2>Board observation needs refreshing</h2>"));
+        assert!(home.contains("<a href=\"\">Retry</a>"));
+        // The runner situation is a separate source and stays fresh.
+        assert!(get(port, "/workers", authority, "").contains("Runner facts · sequence 7"));
+    });
+}
+
+#[test]
+fn partial_frame_keeps_known_sources_and_names_each_gap() {
+    with_frame("partial", |port, authority, _inputs| {
+        frame_pages_render(port, authority);
+        let board = get(port, "/board", authority, "");
+        assert!(board.contains("GitHub snapshot"));
+        assert!(board.contains("#106") && board.contains("#107"));
+        let home = get(port, "/", authority, "");
+        // One absent source is an explicit state, never an alarm and never silence.
+        assert!(home.contains("id=attention role=status"));
+        assert!(!home.contains("role=alert"));
+        assert!(home.contains("Queued workflow runs unavailable"));
+        assert!(!home.contains("Main checks unavailable"));
+        let usage = get(port, "/usage", authority, "");
+        assert!(usage.contains("Deferred by the GitHub reserve"));
+        assert!(usage.contains("queue-age (graphql)"));
+        assert!(usage.contains("held back until the window resets"));
+        assert!(usage.contains("GitHub App · GraphQL</dt><dd>Unknown"));
+        assert!(usage.contains("4960 of 5000 remaining"));
+    });
+}
+
+#[test]
+fn first_run_frame_renders_explicit_missing_states() {
+    with_frame("first_run", |port, authority, inputs| {
+        assert!(!inputs.join("board.jsonl").exists());
+        frame_pages_render(port, authority);
+        let board = get(port, "/board", authority, "");
+        assert!(board.contains("Board unavailable"));
+        assert!(!board.contains("<tbody>"));
+        let home = get(port, "/", authority, "");
+        assert!(!home.contains("id=attention"));
+        assert!(!home.contains("GitHub snapshot"));
+        assert!(get(port, "/workers", authority, "").contains("Lane status unavailable"));
+        assert!(get(port, "/usage", authority, "").contains("No GitHub quota observation reached this page."));
+        assert!(get(port, "/asks", authority, "").contains("Owner asks unavailable"));
+    });
+}
+
+#[test]
+fn failed_board_replacement_degrades_explicitly_and_a_fresh_sample_recovers() {
+    with_frame("healthy", |port, authority, inputs| {
+        let board = inputs.join("board.jsonl");
+        let good = std::fs::read(&board).unwrap();
+        assert!(get(port, "/board", authority, "").contains("#101"));
+        // A malformed replacement never fabricates rows or panics the service. The observer
+        // slice (#2343) evolves this to last-good retention; until then the gap is explicit.
+        std::fs::write(&board, b"not a board sample\n").unwrap();
+        let degraded = get(port, "/board", authority, "");
+        assert!(degraded.contains("Board unavailable"));
+        assert!(!degraded.contains("#101"));
+        assert!(get(port, "/", authority, "").starts_with("HTTP/1.1 200"));
+        std::fs::write(&board, &good).unwrap();
+        let recovered = get(port, "/board", authority, "");
+        assert!(recovered.contains("#101") && recovered.contains("GitHub snapshot"));
+    });
+}

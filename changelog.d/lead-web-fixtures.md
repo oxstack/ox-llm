@@ -1,0 +1,1 @@
+- Six synthetic lead frames (healthy, needs you, alarm, stale, partial, first run) now drive the real `oxa lead serve` routes in tests: native Reader sample and runner situation records, rebased to the age each frame declares, asserting that rows survive staleness, every gap is explicit and no frame fabricates data.

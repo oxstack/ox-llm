@@ -1,0 +1,53 @@
+{
+  "note": "Synthetic alarm frame: a fresh board whose required main check fails, whose last verified main merge is an hour old, whose queued PR #102 is over-age at its exact head, and whose queued run 9002 has waited over 15 minutes. The runner reports one stalled worker.",
+  "age_secs": 15,
+  "situation_age_secs": 30,
+  "board_record": {
+    "schema_version": 1,
+    "observed_at": 1800000000,
+    "board": {
+      "observed_at": 1800000000,
+      "entries": [
+        {"number": 102, "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "release_pinned": false, "action": "wait_required_ci", "lease": null, "attempts_today": 0, "eligible": true},
+        {"number": 105, "head": "2222222222222222222222222222222222222222", "release_pinned": false, "action": "fix_required_ci", "lease": null, "attempts_today": 1, "eligible": false}
+      ]
+    },
+    "panels": {
+      "id": "example-repo",
+      "main": {
+        "refUpdateRule": {"requiredStatusCheckContexts": ["gate"]},
+        "rules": {"totalCount": 0, "nodes": []},
+        "target": {
+          "oid": "dddddddddddddddddddddddddddddddddddddddd",
+          "statusCheckRollup": {"contexts": {"pageInfo": {"hasNextPage": false}, "nodes": [{"name": "gate", "status": "COMPLETED", "conclusion": "FAILURE"}]}},
+          "associatedPullRequests": {
+            "pageInfo": {"hasNextPage": false},
+            "nodes": [{"repository": {"id": "example-repo"}, "baseRefName": "main", "mergedAt": "2027-01-15T07:00:00Z", "mergeCommit": {"oid": "dddddddddddddddddddddddddddddddddddddddd"}}]
+          }
+        }
+      },
+      "mergeQueue": {"entries": {"totalCount": 1, "nodes": [{"pullRequest": {"number": 102, "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}]}}
+    },
+    "landing": {"102": {"queue_alarm": true, "queue": {"enqueued_at": 1799996400}}},
+    "runs": [{"total_count": 1, "workflow_runs": [{"id": 9002, "status": "queued", "updated_at": "2027-01-15T07:30:00Z"}]}],
+    "app_quota": {"core": {"limit": 5000, "remaining": 4200, "resets_at": 1800003600}, "graphql": {"limit": 5000, "remaining": 4100, "resets_at": 1800003600}}
+  },
+  "situation": {
+    "type": "oxa_work_situation",
+    "version": 1,
+    "data": {
+      "as_of_seq": 21,
+      "at_ms": 1800000000000,
+      "standing_revision": 3,
+      "goal": "Ship the lead web polish",
+      "running": [{"task": "task-102", "host": "fixture-host", "branch": "agent/fixture-task-102", "worktree": "~/project/task-102", "session_id": "session-fixture-102", "step": "repair"}],
+      "local_accepted": [],
+      "published": [],
+      "landed": [],
+      "blocked": [],
+      "asks": [],
+      "incidents": [{"id": "incident-stall-102", "subject": {"kind": "task", "data": "task-102"}, "kind": "worker_stalled", "evidence": null}],
+      "history_truncated": false
+    }
+  }
+}

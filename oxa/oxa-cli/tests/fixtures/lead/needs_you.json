@@ -1,0 +1,56 @@
+{
+  "note": "Synthetic needs-you frame: a fresh, quiet board with two open owner decisions in the runner situation and one blocked PR bound to an ask. No alarm source fires; the attention block is a decision request, not an alarm.",
+  "age_secs": 10,
+  "situation_age_secs": 25,
+  "board_record": {
+    "schema_version": 1,
+    "observed_at": 1800000000,
+    "board": {
+      "observed_at": 1800000000,
+      "entries": [
+        {"number": 103, "head": "cccccccccccccccccccccccccccccccccccccccc", "release_pinned": false, "action": "add_removes", "lease": null, "attempts_today": 1, "eligible": false},
+        {"number": 104, "head": "1111111111111111111111111111111111111111", "release_pinned": false, "action": "ready", "lease": null, "attempts_today": 0, "eligible": true}
+      ]
+    },
+    "panels": {
+      "id": "example-repo",
+      "main": {
+        "refUpdateRule": {"requiredStatusCheckContexts": ["gate"]},
+        "rules": {"totalCount": 0, "nodes": []},
+        "target": {
+          "oid": "dddddddddddddddddddddddddddddddddddddddd",
+          "statusCheckRollup": {"contexts": {"pageInfo": {"hasNextPage": false}, "nodes": [{"name": "gate", "status": "COMPLETED", "conclusion": "SUCCESS"}]}},
+          "associatedPullRequests": {
+            "pageInfo": {"hasNextPage": false},
+            "nodes": [{"repository": {"id": "example-repo"}, "baseRefName": "main", "mergedAt": "2027-01-15T07:58:00Z", "mergeCommit": {"oid": "dddddddddddddddddddddddddddddddddddddddd"}}]
+          }
+        }
+      },
+      "mergeQueue": {"entries": {"totalCount": 0, "nodes": []}}
+    },
+    "landing": {"104": {"queue_alarm": false, "queue": {"enqueued_at": 1799999970}}},
+    "runs": [{"total_count": 0, "workflow_runs": []}],
+    "app_quota": {"core": {"limit": 5000, "remaining": 4970, "resets_at": 1800003600}, "graphql": {"limit": 5000, "remaining": 4985, "resets_at": 1800003600}}
+  },
+  "situation": {
+    "type": "oxa_work_situation",
+    "version": 1,
+    "data": {
+      "as_of_seq": 12,
+      "at_ms": 1800000000000,
+      "standing_revision": 2,
+      "goal": "Ship the lead web polish",
+      "running": [],
+      "local_accepted": [],
+      "published": [],
+      "landed": [],
+      "blocked": [{"subject": {"kind": "pull_request", "data": 103}, "code": "owner_decision", "ask_id": "ask-103"}],
+      "asks": [
+        {"id": "ask-target", "subject": {"kind": "repository", "data": null}, "question": "Raise the merge target to 12 per hour?"},
+        {"id": "ask-103", "subject": {"kind": "pull_request", "data": 103}, "question": "Accept the removal rationale on PR #103?"}
+      ],
+      "incidents": [],
+      "history_truncated": false
+    }
+  }
+}

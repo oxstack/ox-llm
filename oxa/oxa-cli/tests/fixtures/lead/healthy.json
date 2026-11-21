@@ -1,0 +1,62 @@
+{
+  "note": "Synthetic healthy frame: a fresh board, every alarm source observed and quiet, one queued PR, live quota windows and a running task. Timestamps sit at a synthetic reference epoch; the test rebases them so the board renders age_secs old.",
+  "age_secs": 12,
+  "situation_age_secs": 20,
+  "board_record": {
+    "schema_version": 1,
+    "observed_at": 1800000000,
+    "board": {
+      "observed_at": 1800000000,
+      "entries": [
+        {"number": 101, "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "release_pinned": false, "action": "ready", "lease": null, "attempts_today": 0, "eligible": true},
+        {"number": 102, "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "release_pinned": false, "action": "wait_review", "lease": null, "attempts_today": 1, "eligible": true},
+        {
+          "number": 103,
+          "head": "cccccccccccccccccccccccccccccccccccccccc",
+          "release_pinned": false,
+          "action": "fix_findings",
+          "lease": {"holder": "fixture-worker", "expires_at": 1800000600, "claimed_at": 1799999940, "generation": [20833, 2]},
+          "attempts_today": 2,
+          "eligible": false
+        }
+      ]
+    },
+    "panels": {
+      "id": "example-repo",
+      "main": {
+        "refUpdateRule": {"requiredStatusCheckContexts": ["gate"]},
+        "rules": {"totalCount": 0, "nodes": []},
+        "target": {
+          "oid": "dddddddddddddddddddddddddddddddddddddddd",
+          "statusCheckRollup": {"contexts": {"pageInfo": {"hasNextPage": false}, "nodes": [{"name": "gate", "status": "COMPLETED", "conclusion": "SUCCESS"}, {"name": "macos", "status": "COMPLETED", "conclusion": "FAILURE"}]}},
+          "associatedPullRequests": {
+            "pageInfo": {"hasNextPage": false},
+            "nodes": [{"repository": {"id": "example-repo"}, "baseRefName": "main", "mergedAt": "2027-01-15T07:58:00Z", "mergeCommit": {"oid": "dddddddddddddddddddddddddddddddddddddddd"}}]
+          }
+        }
+      },
+      "mergeQueue": {"entries": {"totalCount": 1, "nodes": [{"pullRequest": {"number": 101, "headRefOid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]}}
+    },
+    "landing": {"101": {"queue_alarm": false, "queue": {"enqueued_at": 1799999970}}},
+    "runs": [{"total_count": 1, "workflow_runs": [{"id": 9001, "status": "queued", "updated_at": "2027-01-15T07:59:00Z"}]}],
+    "app_quota": {"core": {"limit": 5000, "remaining": 4980, "resets_at": 1800003600}, "graphql": {"limit": 5000, "remaining": 4990, "resets_at": 1800003600}}
+  },
+  "situation": {
+    "type": "oxa_work_situation",
+    "version": 1,
+    "data": {
+      "as_of_seq": 7,
+      "at_ms": 1800000000000,
+      "standing_revision": 1,
+      "goal": "Ship the lead web polish",
+      "running": [{"task": "task-103", "host": "fixture-host", "branch": "agent/fixture-task-103", "worktree": "~/project/task-103", "session_id": "session-fixture-103", "step": "worker"}],
+      "local_accepted": [],
+      "published": [{"task": "task-100", "pr": {"number": 100, "head": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}}],
+      "landed": [{"pr": {"number": 100, "head": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}, "merge_commit": "ffffffffffffffffffffffffffffffffffffffff", "merged_at_ms": 1799996400000}],
+      "blocked": [],
+      "asks": [],
+      "incidents": [],
+      "history_truncated": false
+    }
+  }
+}

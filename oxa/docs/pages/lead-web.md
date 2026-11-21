@@ -174,3 +174,22 @@ the pages did not read before. The server no longer makes its own partial read.
   changed digest after an update reloads the page. Streams use the existing
   16-connection pool and per-write deadline. The one-shot `/events` route and the
   polling fallback remain for listeners without the route.
+
+## Synthetic fixture frames
+
+Six synthetic frames under `oxa/oxa-cli/tests/fixtures/lead/` drive the real service in
+`tests/lead_serve.rs`: `healthy`, `needs_you`, `alarm`, `stale`, `partial` and `first_run`.
+Each file holds the native wire formats — one complete Reader sample record (board, panels,
+landing, queued runs, App quota, deferrals) and one runner situation document — with
+synthetic identities only. Timestamps sit at a synthetic reference epoch; the test rebases
+them so the frame renders the age it declares (`age_secs`, `situation_age_secs`), which
+keeps the files deterministic while the freshness states stay real.
+
+The tests assert behaviour through the real routes: a healthy frame renders no attention
+block; open decisions render as a request, not an alarm; an alarm names every firing
+source; a stale board keeps its rows and offers a retry; a partial sample keeps its known
+sources and names each gap with its cause; a first run renders explicit missing states and
+never a fabricated row; a malformed replacement degrades explicitly and a fresh sample
+recovers. The hosted screenshot job proposed for #2349 renders these same frames at phone
+and desktop widths in light and dark, so every `lead_page/` change is reviewed by looking
+at it.

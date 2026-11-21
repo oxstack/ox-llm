@@ -1,0 +1,7 @@
+{
+  "note": "Synthetic first-run frame: no board sample and no runner situation exist yet. Every page must render its explicit missing state, never a fabricated row, a healthy banner or an alarm.",
+  "age_secs": 0,
+  "situation_age_secs": null,
+  "board_record": null,
+  "situation": null
+}
