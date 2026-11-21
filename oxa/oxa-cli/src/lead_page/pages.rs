@@ -48,6 +48,12 @@ impl Page {
         }
     }
 
+    /// The page lists the owner's running sessions: reading them in a render never lists
+    /// every process on this host (#2343).
+    pub(crate) fn lists_sessions(self) -> bool {
+        matches!(self, Self::Chat(_))
+    }
+
     pub(crate) fn request(path: &str) -> Option<(Self, bool)> {
         let (path, fragment) = path
             .strip_suffix("?fragment=1")

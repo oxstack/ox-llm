@@ -888,3 +888,89 @@ fn authorized_durable_asks_reach_the_protected_view_as_a_live_readback() {
     assert!(refused.starts_with("HTTP/1.1 403"));
     drop(child);
 }
+
+/// GET that returns once the reply headers have arrived, for a stream that stays open.
+fn get_open(port: u16, path: &str, authority: &str) -> TcpStream {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: {authority}\r\n{}\r\n",
+        bearer()
+    )
+    .unwrap();
+    let mut reply = String::new();
+    let mut byte = [0u8; 1];
+    while !reply.ends_with("\r\n\r\n") {
+        let read = stream.read(&mut byte).unwrap();
+        assert!(read > 0, "stream ended in its headers: {reply}");
+        reply.push(byte[0] as char);
+    }
+    stream
+}
+
+/// Append what arrives within the next second; `true` when that includes a `lead-update`.
+fn quiet(stream: &mut TcpStream) -> bool {
+    let mut text = [0u8; 2048];
+    match stream.read(&mut text) {
+        Ok(read) => String::from_utf8_lossy(&text[..read]).contains("lead-update"),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
+        {
+            false
+        }
+        Err(_) => true,
+    }
+}
+
+#[test]
+fn idle_streams_share_one_frame_and_only_publish_real_changes() {
+    // Five open tabs cost what none costs: the stream is woken only by a published frame,
+    // never by a one-second poll. A transient read failure keeps the last page.
+    let test = TestEnv::new();
+    let dirs = oxa_config::Dirs::under(test.root());
+    std::fs::set_permissions(&dirs.agent_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let uid = std::fs::metadata(test.root()).unwrap().uid();
+    let project = test.work().canonicalize().unwrap();
+    let id = oxa_cli::LeadOwnerBinding::create(&dirs, &project, uid).unwrap();
+    let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    test.write(
+        "home/.oxa/agent/settings.json",
+        &serde_json::json!({"oxa":{"lead":{"sessionId":id,
+            "serve":{"enabled":true,"port":port}}}})
+        .to_string(),
+    );
+    let directory = test.root().join("observer-inputs");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let now = oxa_proto::time::now_ms() / 1000;
+    let sample = write_record(
+        &directory,
+        &stuck_record(now, false, 10 * 60, Some(0), false, Some(false)),
+    );
+    let authority = format!("127.0.0.1:{port}");
+    drop(reservation);
+    let _server = start(&test, &sample);
+    let mut tabs = (0..5)
+        .map(|_| get_open(port, "/events/live", &authority))
+        .collect::<Vec<_>>();
+    let page = get(port, "/", &authority, "");
+    assert!(page.starts_with("HTTP/1.1 200"));
+    assert!(page.contains("Queue empty at observation"), "{page}");
+    // A corrupt worker registry is a typed refusal on the page; the board beside it stays.
+    let worker = test.write(&format!("home/.oxa/agent/workers/{id}.json"), "not a registry");
+    std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o600)).unwrap();
+    for tab in &mut tabs {
+        assert!(quiet(tab), "a published frame must reach an open tab");
+    }
+    // Five idle tabs: no further event, so none of them refreshes the page.
+    for tab in &mut tabs {
+        assert!(!quiet(tab), "an idle stream polled the source");
+    }
+    let page = get(port, "/", &authority, "");
+    assert!(page.contains("Queue empty at observation"), "{page}");
+}

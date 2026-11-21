@@ -636,31 +636,9 @@ struct Source {
     form: Option<crate::lead_http::FixedForm>,
     owner: Option<Arc<OwnerChat>>,
     desk: Option<ApprovalDesk>,
-}
-/// The stable part of the worker bindings: a status age that merely grows each second
-/// is not a change, only crossing the stale mark is.
-fn bindings_key(
-    bindings: &Option<Result<Vec<crate::workers::tool::Binding>, crate::workers::tool::BindingsError>>,
-) -> String {
-    let key = bindings.as_ref().map(|result| {
-        result
-            .as_ref()
-            .map(|list| {
-                list.iter()
-                    .map(|b| {
-                        (
-                            &b.name,
-                            &b.branch,
-                            &b.model,
-                            format!("{:?}", b.state),
-                            b.status_age_secs.map(|age| age > 300),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .map_err(|error| *error as u8)
-    });
-    format!("{key:?}")
+    /// The one cached frame every page and every live stream reads (#2343). Until
+    /// [`Observer::start`] runs, each render reads the sources once itself.
+    observer: Option<Arc<crate::lead_observer::Observer>>,
 }
 
 impl Source {
@@ -684,6 +662,7 @@ impl Source {
             form: None,
             owner: None,
             desk: None,
+            observer: None,
         })
     }
 
@@ -698,10 +677,8 @@ impl Source {
             })
     }
 
-    /// The one observation every page, and the live fingerprint, is built from. The bounded
-    /// reader revalidates owner-only files and directories on every read; missing, stale and
-    /// refused data stay explicit in the shared renderer.
-    fn observe(&self) -> Option<crate::lead_observation::Observation> {
+    /// One bounded read of the protected sources, for a render before the observer runs.
+    fn read_now(&self) -> Option<crate::lead_observation::Observation> {
         let board = self.board.as_deref()?;
         let observation = crate::lead_observation::Observation::read(
             board,
@@ -715,36 +692,29 @@ impl Source {
         })
     }
 
-    /// A hash of what the pages show: it changes exactly when an observation does (board
-    /// time, situation sequence, ask revisions, worker states), so a quiet system sends nothing.
-    fn fingerprint(&self) -> u64 {
-        use std::hash::{DefaultHasher, Hash, Hasher};
-        let mut hash = DefaultHasher::new();
-        if let Some(observation) = self.observe() {
-            observation.cause.is_some().hash(&mut hash);
-            observation.board.observed_at.hash(&mut hash);
-            observation
-                .situation
-                .as_ref()
-                .map(|s| s.as_of_seq)
-                .hash(&mut hash);
-            bindings_key(&observation.bindings).hash(&mut hash);
-        }
-        if let Some(asks) = self.durable_asks() {
-            asks.iter()
-                .map(|ask| (&ask.id, ask.revision))
-                .collect::<Vec<_>>()
-                .hash(&mut hash);
-        }
-        hash.finish()
-    }
-
     fn render(&self, page: crate::lead_page::Page, fragment: bool) -> String {
-        let observation = self.observe();
+        // Render from the one frame: no source is read or parsed on this path (#2343). Chat's
+        // session tail, the durable asks and the CSRF state stay live reads below.
+        let frame = self
+            .observer
+            .as_ref()
+            .map(|observer| crate::lead_observer::Observer::frame(observer));
+        // The frame's observation is never mutated, so the page borrows it instead of copying
+        // a board of up to 128 rows; only a render without an observer reads one.
+        let read = if frame.is_some() { None } else { self.read_now() };
+        let observation = frame
+            .as_ref()
+            .and_then(|frame| frame.observation.as_ref())
+            .or(read.as_ref());
         let observed = observation.as_ref().filter(|o| o.cause.is_none());
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
+        let now = frame.as_ref().map_or_else(
+            || {
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs())
+            },
+            |frame| frame.now_ms / 1000,
+        );
         let github_quotas = observed.and_then(|o| {
             crate::lead_quota::GitHubQuotas::from_app_sample(o.app_quota?, o.board.observed_at, now)
         });
@@ -763,9 +733,13 @@ impl Source {
         } else {
             None
         };
-        // The authenticated live readback (#1391): open owner asks are read from
-        // the authorized durable Session on every render, never from a sample.
-        let durable_asks = self.durable_asks();
+        // The authenticated live readback (#1391): open owner asks are read from the
+        // authorized durable Session. The observer reads them for the frame, so an idle render
+        // opens no session file; without an observer the render reads them itself.
+        let durable_asks = match frame.as_ref() {
+            Some(frame) => frame.asks.clone(),
+            None => self.durable_asks(),
+        };
         // The attached session's newest part is read without its writer lock (#2075).
         let current = owner.and_then(|owner| owner.current());
         let attached = match (&current, owner) {
@@ -774,18 +748,28 @@ impl Source {
             }
             _ => None,
         };
-        // The owner's running sessions to choose from (#1469), on the chat page only.
+        // The owner's running sessions to choose from (#1469), on the chat page only, and only
+        // when the page lists them: an idle page costs no process scan, and the owner's own
+        // chat message still answers with the rendered page.
         let attached_id = attached.as_ref().map(|(_, attached, _)| attached.session_id());
+        // The owner's message acknowledges itself in the render that confirms it; that claim
+        // is taken on every render, so no later render shows a send it did not confirm.
+        let sent = owner.is_some_and(|owner| owner.sent.swap(false, Ordering::SeqCst));
         let rows: Option<Vec<crate::lead_page::SessionRow>> = owner.map(|owner| {
-            lead_attach::live_sessions(&owner.dirs, owner.uid)
-                .into_iter()
-                .map(|live| crate::lead_page::SessionRow {
-                    attached: attached_id == Some(live.id.as_str()),
-                    id: live.id,
-                    cwd_name: live.cwd_name,
-                    modified_ms: live.modified_ms,
-                })
-                .collect()
+            // The chat page lists the owner's running sessions; nothing else lists them.
+            if page.lists_sessions() {
+                lead_attach::live_sessions(&owner.dirs, owner.uid)
+            } else {
+                Vec::new()
+            }
+            .into_iter()
+            .map(|live| crate::lead_page::SessionRow {
+                attached: attached_id == Some(live.id.as_str()),
+                id: live.id,
+                cwd_name: live.cwd_name,
+                modified_ms: live.modified_ms,
+            })
+            .collect()
         });
         let back = owner
             .filter(|owner| !same_target(&owner.start, &current))
@@ -811,7 +795,7 @@ impl Source {
                     live: attached.live(),
                     short_id: attached.short_id(),
                     id: attached.session_id().to_owned(),
-                    sent: owner.sent.swap(false, Ordering::SeqCst),
+                    sent,
                     activity: lead_attach::activity(&tail.entries).map(|activity| match activity {
                         lead_attach::Activity::Working => "working",
                         lead_attach::Activity::Idle => "idle",
@@ -850,23 +834,41 @@ impl Source {
         }
     }
 
-    /// Open owner asks read live from the authorized durable Lead Session, with
-    /// their original revisions. The binding revalidates the owner-only session
-    /// file and the user settings on every read; an unauthorized, busy or absent
-    /// session stays explicitly unavailable rather than quietly empty.
+    /// Open owner asks read live from the authorized durable Lead Session. The observer reads
+    /// them for the frame; a render without an observer reads them itself.
     fn durable_asks(&self) -> Option<Vec<oxa_session::OpenGoalAsk>> {
-        let owner = self.owner.as_ref()?;
-        // The configured start-up session only: a session the owner picked on the page is not
-        // the Lead's durable goal.
-        let start = owner.start.as_ref()?;
-        start.recheck().ok()?;
-        let entries = start.read_entries_for_goal().ok()?;
-        let goal = oxa_session::Goal::latest(&entries).ok()?;
-        Some(
-            goal.map(|goal| goal.lead.map_or_else(Vec::new, |lead| lead.open_asks))
-                .unwrap_or_default(),
-        )
+        durable_asks(self.owner.as_deref())
     }
+}
+
+/// The session id the observer reads the Lead's workers for. The configured start-up session
+/// is re-proved against the owner-only settings and binding on every tick, so a session the
+/// owner changed, replaced or revoked shows no worker rows instead of stale ones. `None` with
+/// no owner chat: the pages then have no worker source at all.
+fn worker_owner(owner: Option<&OwnerChat>) -> Option<String> {
+    let start = owner?.start.as_ref()?;
+    start.recheck().ok()?;
+    Some(match start {
+        OwnerSession::Dedicated(binding) => binding.session_id().to_owned(),
+        OwnerSession::Attached(attached) => attached.session_id().to_owned(),
+    })
+}
+
+/// Open owner asks with their original revisions, read from the authorized durable Lead
+/// Session. The binding revalidates the owner-only session file and the user settings on
+/// every read; an unauthorized, busy or absent session stays explicitly unavailable rather
+/// than quietly empty.
+fn durable_asks(owner: Option<&OwnerChat>) -> Option<Vec<oxa_session::OpenGoalAsk>> {
+    // The configured start-up session only: a session the owner picked on the page is not the
+    // Lead's durable goal.
+    let start = owner?.start.as_ref()?;
+    start.recheck().ok()?;
+    let entries = start.read_entries_for_goal().ok()?;
+    let goal = oxa_session::Goal::latest(&entries).ok()?;
+    Some(
+        goal.map(|goal| goal.lead.map_or_else(Vec::new, |lead| lead.open_asks))
+            .unwrap_or_default(),
+    )
 }
 
 /// SHA-256 of the serving executable as 64 lowercase hex characters; `None` when it cannot
@@ -1037,14 +1039,56 @@ pub fn run(dirs: &Dirs, cwd: &Path, env: &Env, out: &mut dyn Write) -> Result<i3
     // changed digest after an update makes an open page reload itself.
     source.live = true;
     source.running_sha256 = self_digest();
+    // One observer per server: it stat()s and parses the sources about once a second, and
+    // every page and stream reads the frame it publishes (#2343).
+    // The observer runs in this process and owns the same `Arc<OwnerChat>`: the start-up
+    // session stays live, so a setting change or a revoked binding is seen on the next tick.
+    let owner_state = source.owner.clone();
+    let parent = move || worker_owner(owner_state.as_deref());
+    // The owner's own durable asks (#1391): the authorized session's entries, revalidated on
+    // every read. The observer keeps them in the frame, so an idle page reads no session file.
+    let owner_state = source.owner.clone();
+    let asks = move || {
+        let asks = durable_asks(owner_state.as_deref())?;
+        Some((
+            asks.iter()
+                .map(|ask| (ask.id.clone(), ask.revision))
+                .collect::<Vec<_>>(),
+            asks,
+        ))
+    };
+    source.observer = Some(crate::lead_observer::Observer::start(
+        crate::lead_observer::Sources {
+            board: source.board.clone(),
+            situation: source.situation.clone(),
+            uid,
+            agent_dir: source.agent_dir.clone(),
+            sessions_dir: source.sessions_dir.clone(),
+            parent: Box::new(parent),
+            asks: Box::new(asks),
+        },
+    ));
     let source = Arc::new(source);
     let live = crate::lead_http::Live {
-        fingerprint: {
+        generation: {
             let source = source.clone();
-            Box::new(move || source.fingerprint())
+            Box::new(move || {
+                source
+                    .observer
+                    .as_ref()
+                    .map_or(0, |observer| observer.generation())
+            })
+        },
+        wait: {
+            let source = source.clone();
+            Box::new(move |seen: u64, timeout: std::time::Duration| {
+                source
+                    .observer
+                    .as_ref()
+                    .map_or(seen, |observer| observer.wait(seen, timeout))
+            })
         },
         running_sha256: source.running_sha256.clone(),
-        poll: std::time::Duration::from_secs(1),
     };
     let served = crate::lead_http::serve_fixed(
         listener,
@@ -1518,28 +1562,6 @@ mod tests {
 #[cfg(test)]
 mod live_tests {
     use super::*;
-
-    #[test]
-    fn a_growing_status_age_does_not_change_the_live_fingerprint() {
-        use crate::workers::registry::WorkerState;
-        use crate::workers::tool::Binding;
-        let at = |age: u64| {
-            Some(Ok(vec![Binding {
-                name: "w".into(),
-                branch: "b".into(),
-                model: "m".into(),
-                state: WorkerState::Working,
-                started_ms: 1,
-                status_age_secs: Some(age),
-            }]))
-        };
-        assert_eq!(bindings_key(&at(3)), bindings_key(&at(9)));
-        assert_ne!(
-            bindings_key(&at(3)),
-            bindings_key(&at(400)),
-            "going stale is a change"
-        );
-    }
 
     #[test]
     fn the_page_advertises_live_events_only_when_the_route_is_installed() {

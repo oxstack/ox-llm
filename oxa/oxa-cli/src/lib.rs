@@ -40,6 +40,7 @@ pub mod lead_http;
 pub mod lead_input;
 mod lead_loop;
 mod lead_observation;
+mod lead_observer;
 pub mod lead_page;
 pub mod lead_panels;
 pub mod lead_peer;

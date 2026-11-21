@@ -147,12 +147,23 @@ line contains the response status, a fixed stage and reason, and a suggested
 remedy. It omits the owner identity, message, token counts, URLs, headers,
 credentials and CSRF values.
 
-## One observation, live workers and live refresh
+## One observation, observers and live refresh
 
-Every page is rendered from the same observation the Lead loop uses: the protected
+The service runs one observer thread that owns every read of the protected sources: the
 Board sample (board, alarms, GitHub App quota, thread holds and the quota deferrals the
-owner's reserve recorded) and the runner situation named by `OXA_LEAD_SITUATION`, which
-the pages did not read before. The server no longer makes its own partial read.
+owner's reserve recorded), the runner situation named by `OXA_LEAD_SITUATION`, the Lead
+session's worker registry and the owner's open durable asks from the authorized Lead
+Session. It checks each source about once a second and parses one only when it changed
+(size, time or identity), then publishes one immutable frame. Every page and every open
+tab renders from that frame, so an idle server with five tabs open does the same work as
+one with none, and a page request reads no source file. Chat is the exception: the
+attached session's transcript, the list of running sessions and the CSRF state are read on
+the chat page.
+
+A read that fails after a good one keeps the previous frame and shows its cause, so one
+transient read error no longer empties the page. A frame is published only when what a
+page shows changes; the Board's own age still advances, so a sample that stops being
+written turns stale without a parse, and a quiet system sends nothing to any open tab.
 
 - **Workers** shows the Lead session's live workers first: name, lane (branch), model,
   state and how old the worker's status file is (a Dead worker, a Stopped worker and a
@@ -167,10 +178,10 @@ the pages did not read before. The server no longer makes its own partial read.
 - **Live refresh.** With the route installed (always for `oxa lead serve`) the document
   advertises it and the page opens `GET /events/live`, behind the same authorization as
   every other path. The server sends `retry: 5000` and a `lead-update` event at once and
-  again only when a fingerprint of the observation changes (board time, situation
-  sequence, ask revisions, worker states), polled once a second; a `: keep-alive`
-  comment goes out every 15 seconds and the stream ends after five minutes so the
-  client reconnects. The event carries the SHA-256 of the serving executable, so a
-  changed digest after an update reloads the page. Streams use the existing
-  16-connection pool and per-write deadline. The one-shot `/events` route and the
-  polling fallback remain for listeners without the route.
+  again only when the observer publishes a new frame; each stream then waits on the
+  observer, so it never re-reads or re-parses a source itself. A `: keep-alive` comment
+  goes out after 15 quiet seconds and the stream ends after five minutes so the client
+  reconnects. The event carries the SHA-256 of the serving executable, so a changed digest
+  after an update reloads the page. Streams use the existing 16-connection pool and
+  per-write deadline. The one-shot `/events` route and the polling fallback remain for
+  listeners without the route.

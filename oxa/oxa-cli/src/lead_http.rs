@@ -121,15 +121,18 @@ pub fn serve(
     serve_fixed(listener, authorize, render, None, None, None, None)
 }
 
-/// The authenticated live route `/events/live` (#1366): a change fingerprint the
-/// caller derives from one observation, and the digest of the serving executable so a
-/// replaced binary makes the page reload. Without it the route does not exist and the
-/// page keeps its polling fallback.
+/// The authenticated live route `/events/live` (#1366): the observer's generation, which
+/// changes only when a source published a new frame, and the digest of the serving
+/// executable so a replaced binary makes the page reload. Without it the route does not
+/// exist and the page keeps its polling fallback. A stream waits on the observer's condvar
+/// and never reads or parses a source itself, so any number of open tabs cost the same.
 pub(crate) struct Live {
-    pub fingerprint: Box<dyn Fn() -> u64 + Send + Sync>,
+    /// The generation now published, sampled before the first event goes out.
+    pub generation: Box<dyn Fn() -> u64 + Send + Sync>,
+    /// Block until the generation differs from the argument, or the timeout passes; returns
+    /// the generation then published. The timeout is this stream's keep-alive budget.
+    pub wait: Box<dyn Fn(u64, Duration) -> u64 + Send + Sync>,
     pub running_sha256: Option<String>,
-    /// How often the fingerprint is compared (one second in service).
-    pub poll: Duration,
 }
 
 /// A live stream ends after this long; the client's normal rotation reconnects.
@@ -484,8 +487,9 @@ fn connection_fixed(
 }
 
 /// `text/event-stream` with no length: `retry` and one `lead-update` at once, another
-/// whenever the fingerprint changes, a keep-alive comment while quiet, and an end after
-/// [`LIVE_LIFETIME`]. Each write has its own deadline, so a stalled reader frees its slot.
+/// whenever the observer publishes a new frame, a keep-alive comment while quiet, and an end
+/// after [`LIVE_LIFETIME`]. Each write has its own deadline, so a stalled reader frees its
+/// slot; between writes a stream only sleeps on the observer's condvar.
 fn stream_live(stream: &mut TcpStream, live: &Live, has_form: bool) -> std::io::Result<()> {
     let form_action = if has_form { "'self'" } else { "'none'" };
     let referrer = if has_form { "same-origin" } else { "no-referrer" };
@@ -499,22 +503,20 @@ fn stream_live(stream: &mut TcpStream, live: &Live, has_form: bool) -> std::io::
     // Sample the baseline before the first event goes out: a change that lands
     // while that event is in flight must still produce an update, not disappear
     // into the baseline.
-    let mut last = (live.fingerprint)();
+    let mut last = (live.generation)();
     write_response(
         stream,
         &[headers.as_bytes(), b"retry: 5000\n", update.as_bytes()],
         LIVE_WRITE,
     )?;
-    let (began, mut quiet) = (Instant::now(), Instant::now());
+    let began = Instant::now();
     while began.elapsed() < LIVE_LIFETIME {
-        std::thread::sleep(live.poll);
-        let now = (live.fingerprint)();
+        let left = LIVE_LIFETIME.saturating_sub(began.elapsed());
+        let now = (live.wait)(last, LIVE_KEEP_ALIVE.min(left));
         if now != last {
             last = now;
-            quiet = Instant::now();
             write_response(stream, &[update.as_bytes()], LIVE_WRITE)?;
-        } else if quiet.elapsed() >= LIVE_KEEP_ALIVE {
-            quiet = Instant::now();
+        } else {
             write_response(stream, &[b": keep-alive\n\n"], LIVE_WRITE)?;
         }
     }
@@ -1170,22 +1172,30 @@ mod tests {
         let (reads, value) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicU64::new(1)));
         let live = || {
             let (reads, value) = (reads.clone(), value.clone());
+            let (read, current) = (reads.clone(), value.clone());
             Live {
-                fingerprint: Box::new(move || {
+                generation: Box::new(move || {
                     reads.fetch_add(1, Ordering::SeqCst);
                     value.load(Ordering::SeqCst)
                 }),
+                wait: Box::new(move |seen, timeout| {
+                    let deadline = Instant::now() + timeout;
+                    while current.load(Ordering::SeqCst) == seen && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    read.fetch_add(1, Ordering::SeqCst);
+                    current.load(Ordering::SeqCst)
+                }),
                 running_sha256: Some("a".repeat(64)),
-                poll: Duration::from_millis(20),
             }
         };
-        // Unauthorized: refused before the fingerprint is ever read.
+        // Unauthorized: refused before the generation is ever read.
         let mut refused = live_client(false, live());
         let mut reply = String::new();
         refused.read_to_string(&mut reply).unwrap();
         assert!(reply.starts_with("HTTP/1.1 403"), "{reply}");
         assert_eq!(reads.load(Ordering::SeqCst), 0);
-        // Authorized: the first update at once, a second only after the fingerprint changes.
+        // Authorized: the first update at once, a second only after the generation changes.
         let mut client = live_client(true, live());
         let first = read_updates(&mut client, 1);
         assert!(first.contains("Content-Type: text/event-stream"), "{first}");
@@ -1206,17 +1216,18 @@ mod tests {
         use std::sync::{Condvar, Mutex};
         // Force the interleaving the loaded CI runner hit by chance: the value
         // changes after the client has received the first event, but before the
-        // server samples its baseline fingerprint. The first fingerprint call
-        // waits (bounded) for that change; a baseline sampled after the first
-        // write swallows it and never sends a second event. With the baseline
-        // sampled before the first write the wait cannot be satisfied in time
-        // and simply expires, and the change is delivered.
+        // server samples its baseline generation. The baseline call waits
+        // (bounded) for that change; a baseline sampled after the first write
+        // swallows it and never sends a second event. With the baseline sampled
+        // before the first write the wait cannot be satisfied in time and simply
+        // expires, and the change is delivered.
         let value = Arc::new(AtomicU64::new(1));
         let changed = Arc::new((Mutex::new(false), Condvar::new()));
         let baseline_call = Arc::new(AtomicBool::new(true));
-        let (fingerprint_value, signal, baseline) = (value.clone(), changed.clone(), baseline_call.clone());
+        let (current, signal, baseline) = (value.clone(), changed.clone(), baseline_call.clone());
+        let waited = value.clone();
         let live = Live {
-            fingerprint: Box::new(move || {
+            generation: Box::new(move || {
                 if baseline.swap(false, Ordering::SeqCst) {
                     let (lock, cvar) = &*signal;
                     let mut got = lock.lock().unwrap();
@@ -1229,10 +1240,16 @@ mod tests {
                         got = cvar.wait_timeout(got, left).unwrap().0;
                     }
                 }
-                fingerprint_value.load(Ordering::SeqCst)
+                current.load(Ordering::SeqCst)
+            }),
+            wait: Box::new(move |seen, timeout| {
+                let deadline = Instant::now() + timeout;
+                while waited.load(Ordering::SeqCst) == seen && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                waited.load(Ordering::SeqCst)
             }),
             running_sha256: None,
-            poll: Duration::from_millis(20),
         };
         let mut client = live_client(true, live);
         let first = read_updates(&mut client, 1);
