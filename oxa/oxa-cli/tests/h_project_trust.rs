@@ -28,6 +28,15 @@ impl Write for Sink {
 
 /// Run `oxa -p hi` in-process; returns the exit code and stderr.
 fn go(env: &TestEnv) -> (i32, String) {
+    go_args(env, vec!["-p".to_string(), "hi".to_string()])
+}
+
+/// Run `oxa --help` in-process; the help path decides trust without a session.
+fn help(env: &TestEnv) -> (i32, String) {
+    go_args(env, vec!["--help".to_string()])
+}
+
+fn go_args(env: &TestEnv, argv: Vec<String>) -> (i32, String) {
     let server = FakeServer::start(vec![ScriptTurn::text("ok")], FakeOpts::default()).expect("fake engine");
     let owned = env.envs(&server.url());
     let cwd = env.work();
@@ -44,7 +53,6 @@ fn go(env: &TestEnv) -> (i32, String) {
             stdout_is_tty: false,
             cwd,
         };
-        let argv = vec!["-p".to_string(), "hi".to_string()];
         let code = run(&argv, &env, io);
         let text = String::from_utf8_lossy(&err.0.lock().unwrap()).into_owned();
         let _ = tx.send((code, text));
@@ -93,7 +101,7 @@ fn extension_decides_trust() {
 }
 
 #[test]
-fn undecided_falls_through_to_the_default() {
+fn undecided_falls_through_to_the_shipped_default() {
     let env = TestEnv::new();
     project_ext(&env);
     user_ext(&env, "{ trusted: 'undecided' }");
@@ -101,8 +109,33 @@ fn undecided_falls_through_to_the_default() {
     assert_eq!(code, 0, "{err}");
     assert!(env.work().join("trust-log.txt").exists(), "project_trust fired");
     assert!(
+        env.work().join("project-log.txt").exists(),
+        "no decision: defaultProjectTrust ships as always, so the project's extension loads"
+    );
+    // `project_trust` asks before the default resolves, so the shipped default trusts the
+    // project without writing a decision the owner never made.
+    assert!(!env.agent_dir().join("trust.json").exists(), "nothing saved");
+}
+
+/// An owner who wants the question (`defaultProjectTrust: "ask"`) keeps the old headless
+/// behaviour: no prompt, the resources are skipped, and the notice names them.
+#[test]
+fn ask_opt_in_skips_without_a_question() {
+    let env = TestEnv::new();
+    project_ext(&env);
+    env.write(
+        "home/.oxa/agent/settings.json",
+        r#"{"defaultProjectTrust":"ask"}"#,
+    );
+    let (code, err) = go(&env);
+    assert_eq!(code, 0, "{err}");
+    assert!(
         !env.work().join("project-log.txt").exists(),
-        "no decision, not interactive: the project stays untrusted"
+        "ask without a terminal skips the project's extension"
+    );
+    assert!(
+        err.contains("not trusted") && err.contains(".oxa/extensions"),
+        "{err}"
     );
     assert!(!env.agent_dir().join("trust.json").exists(), "nothing saved");
 }
@@ -116,6 +149,85 @@ fn not_fired_without_gated_resources() {
     assert!(
         !env.work().join("trust-log.txt").exists(),
         "nothing to trust: no event"
+    );
+}
+
+#[test]
+fn content_policy_checks_changes_without_a_saved_folder_decision() {
+    for user_settings in [
+        r#"{"projectTrustPolicy":"content"}"#,
+        r#"{"projectTrustPolicy":"content","defaultProjectTrust":"always"}"#,
+    ] {
+        let env = TestEnv::new();
+        env.write("home/.oxa/agent/settings.json", user_settings);
+        project_ext(&env);
+        let marker = env.work().join("project-log.txt");
+        let (code, err) = go(&env);
+        assert_eq!(code, 0, "{err}");
+        assert!(marker.exists(), "first use still trusts the folder");
+        std::fs::remove_file(&marker).unwrap();
+        let (code, err) = go(&env);
+        assert_eq!(code, 0, "{err}");
+        assert!(marker.exists(), "unchanged content still loads");
+        std::fs::remove_file(&marker).unwrap();
+
+        env.write("work/.oxa/extensions/local.js", "// changed\n");
+        let (code, err) = go(&env);
+        assert_eq!(code, 0, "{err}");
+        assert!(
+            err.contains("Project config not loaded") && err.contains("local.js"),
+            "{err}"
+        );
+        assert_eq!(
+            oxa_perm::TrustStore::load(&env.agent_dir().join("trust.json")).lookup(&env.work()),
+            None
+        );
+    }
+}
+
+#[test]
+fn content_policy_tracks_first_resources_in_an_empty_default_trusted_project() {
+    let env = TestEnv::new();
+    env.write(
+        "home/.oxa/agent/settings.json",
+        r#"{"projectTrustPolicy":"content"}"#,
+    );
+    let (code, err) = go(&env);
+    assert_eq!(code, 0, "{err}");
+    project_ext(&env);
+    let (code, err) = go(&env);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        err.contains("Project config not loaded") && err.contains("local.js"),
+        "{err}"
+    );
+    assert!(!env.work().join("project-log.txt").exists());
+}
+
+/// `--help` is a project-resource read too: in an empty default-trusted project under the
+/// owner's content opt-in it records the empty snapshot, so executable content a later
+/// repository update adds is changed content, not the first approved baseline.
+#[test]
+fn content_policy_help_snapshots_an_empty_default_trusted_project() {
+    let env = TestEnv::new();
+    env.write(
+        "home/.oxa/agent/settings.json",
+        r#"{"projectTrustPolicy":"content"}"#,
+    );
+    let (code, err) = help(&env);
+    assert_eq!(code, 0, "{err}");
+    project_ext(&env);
+    let (code, err) = go(&env);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        err.contains("Project config not loaded") && err.contains("local.js"),
+        "{err}"
+    );
+    assert!(!env.work().join("project-log.txt").exists());
+    assert_eq!(
+        oxa_perm::TrustStore::load(&env.agent_dir().join("trust.json")).lookup(&env.work()),
+        None,
+        "the snapshot saves no folder decision"
     );
 }
 
@@ -201,7 +313,8 @@ fn parent_folder_trust_loads_changes_without_granting_content_approval() {
     );
     assert!(!marker.exists());
 
-    // An explicit child denial still beats the saved parent grant under folder policy.
+    // An explicit child denial still beats the saved parent grant under folder policy, and
+    // the shipped default does not overrule it.
     env.write("home/.oxa/agent/settings.json", "{}");
     store.save(&trust, &work, false).unwrap();
     let (code, err) = go(&env);

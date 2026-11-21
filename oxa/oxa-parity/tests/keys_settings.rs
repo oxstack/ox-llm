@@ -1378,6 +1378,7 @@ fn set_016() {
 /// SET-017: `defaultProjectTrust` `ask|always|never`; agent-directory settings only.
 #[test]
 fn set_017() {
+    // invariant: `defaultProjectTrust` is user-only; the shipped default `always` trusts a project with no setting and saves no decision, and `ask`/`never` are owner opt-ins (a project value is dropped with a warning, never honoured)
     // pi docs: settings.md `defaultProjectTrust` "Fallback project-trust behavior. Can only be
     // set in agent-directory settings." In print mode `ask` is untrusted (no dialog).
     // (a) `always` in the agent directory trusts the project: its defaultTools applies.
@@ -1387,34 +1388,31 @@ fn set_017() {
     ok(&rig.print(&[]));
     assert_eq!(tools(&rig.bodies()[0]), ["ls"], "always trusts the project");
 
-    // (b) the same value in the project file is not honoured: the project stays untrusted.
+    // (b) the shipped default trusts the project with no setting at all: its defaultTools applies.
     let rig = Rig::new(&[text("ok")]);
-    rig.project_settings(json!({ "defaultProjectTrust": "always", "defaultTools": ["ls"] }));
+    rig.project_settings(json!({ "defaultTools": ["ls"] }));
+    ok(&rig.print(&[]));
+    assert_eq!(
+        tools(&rig.bodies()[0]),
+        ["ls"],
+        "a fresh install trusts the project"
+    );
+
+    // (c) a project-level value is dropped as a user-only setting, so the project's own
+    // `defaultTools` is still the trusted one; the warning names the key.
+    let rig = Rig::new(&[text("ok")]);
+    rig.project_settings(json!({ "defaultProjectTrust": "never", "defaultTools": ["ls"] }));
     let out = rig.print(&[]);
     ok(&out);
     assert!(
-        warned(&out, "project resources were skipped"),
+        warned(&out, "is user-only and is ignored in a project file"),
         "a project-level defaultProjectTrust is ignored: {}",
         stderr(&out)
     );
-    // No agents are installed: the lead defaults include ask, but not subagent or the
-    // untrusted project's replacement ["ls"].
     assert_eq!(
         tools(&rig.bodies()[0]),
-        [
-            "ask",
-            "bash",
-            "deliverable",
-            "edit",
-            "find",
-            "grep",
-            "ls",
-            "read",
-            "wait",
-            "worker",
-            "write"
-        ],
-        "the project's defaultTools is not applied"
+        ["ls"],
+        "the user layer decides, not the project"
     );
 }
 

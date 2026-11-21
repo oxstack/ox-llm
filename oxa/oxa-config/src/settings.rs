@@ -498,6 +498,17 @@ impl Settings {
     pub fn user_value(&self, key: &str) -> Option<&Value> {
         lookup(&self.user, key)
     }
+    /// `defaultProjectTrust` (`ask`, `always`, `never`) from the user file only, or `None` when
+    /// the owner left it unset, set it in a project file or typed another value. `None` selects
+    /// the shipped default; a user file that cannot be read fails safe to `never`.
+    pub fn project_trust_default(&self) -> Option<&'static str> {
+        match self.user_value("defaultProjectTrust").and_then(Value::as_str) {
+            Some("ask") => Some("ask"),
+            Some("always") => Some("always"),
+            Some("never") => Some("never"),
+            _ => None,
+        }
+    }
     /// Folder trust is the default. Only the owner can select per-content approval.
     pub fn project_trust_requires_content(&self) -> bool {
         self.user_value("projectTrustPolicy").and_then(Value::as_str) == Some("content")

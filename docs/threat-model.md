@@ -10,7 +10,7 @@ Used by automated security review (Codex) and by human/agent reviewers. Keep it 
 
 ## Who may be hostile
 - **Model output** (any provider, any model): may try to read secrets, escape the sandbox of an unattended run, call tools it should not, or smuggle secrets into tool arguments. In yolo it already has the owner's rights.
-- **Repository content and project settings** (`.oxa/`, project settings files, AGENTS.md, skills, MCP config in a cloned repo): untrusted unless the user trusts the project.
+- **Repository content and project settings** (`.oxa/`, project settings files, AGENTS.md, skills, MCP config in a cloned repo): trusted by default (owner decision 2026-11-21), so its hooks, MCP servers, extensions, skills and prompts run as you. The owner can opt into a question per project (`defaultProjectTrust: "ask"`) or into loading nothing (`"never"`); a project file cannot set either.
 - **Upstream providers and the network:** malformed or hostile streams, oversized responses, redirects, wrong usage/billing fields.
 - **LAN share guests** and **outside contributors** (fork PRs on this public repo).
 
@@ -23,7 +23,7 @@ So these are **not** P0/P1 and never block a merge (at most P3 hardening, filed 
 - anything in yolo beyond its two hard refusals (publishing a secret, an OS-breaking wipe);
 - theoretical chains with no concrete trigger a real model or project hits in normal use.
 
-What still blocks (P0/P1): a secret leaving the machine or landing in model context, logs or session files; a remote party (network, LAN guest, fork PR, provider stream) gaining code execution, credentials or spend; metered money spent past the reservation, ledger or a configured cap; an untrusted project changing user-only settings; data loss or an OS-breaking wipe under default settings; offline mode using the network.
+What still blocks (P0/P1): a secret leaving the machine or landing in model context, logs or session files; a remote party (network, LAN guest, fork PR, provider stream) gaining code execution, credentials or spend; metered money spent past the reservation, ledger or a configured cap; a project file changing user-only settings (trusted or not); data loss or an OS-breaking wipe under default settings; offline mode using the network.
 
 **Power is the default; restrictions need the owner (owner 2026-11-21).** Any change that makes oxa less powerful (a new refusal, prompt, cap, fail-closed path, narrower default, or a removed capability) needs the owner's explicit acceptance. Its PR body carries one line per restriction: `Restricts: <what> — <why> — <drawback for the user>`, and the PR merges only after the owner accepts it with the `owner-accepted` label. This holds for review findings too: a finding that asks for such a change states the same three things, and outside the block list it is a P3 suggestion, never a blocker.
 

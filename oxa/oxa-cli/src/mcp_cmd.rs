@@ -501,6 +501,17 @@ fn cmd_sign_in(
         i += 1;
     }
     let (name, local) = parse_name_and_local(&rest, verb)?;
+    // Sign-in can connect and evaluate configured values. Apply the same trust gate as
+    // `mcp list` before reading a project server. Sign-out only removes a stored token.
+    if login && local && !crate::approval::saved_project_resources(dirs, cwd, err)? {
+        writeln!(
+            err,
+            "Project MCP server not loaded. Fix: {}",
+            crate::approval::approval_fix(cwd)
+        )
+        .map_err(|e| OxaError::io("write output", &e))?;
+        return Ok(1);
+    }
     let file = target_file(dirs, cwd, local);
     let config = load_config(&file, None);
     let server = config.servers.iter().find(|s| s.name == name).ok_or_else(|| {
@@ -540,12 +551,11 @@ fn cmd_sign_in(
         return Ok(0);
     }
 
-    let trusted = crate::approval::saved_project_resources(dirs, cwd, err)?;
     let single = McpConfig {
         servers: vec![server.clone()],
         ..McpConfig::default()
     };
-    let first = connect_all(&single, dirs, cwd, trusted);
+    let first = connect_all(&single, dirs, cwd, local);
     match first.first().map(|s| &s.state) {
         Some(ServerState::Connected) => {
             let n = first[0].tools.len();
@@ -591,7 +601,7 @@ fn cmd_sign_in(
         writeln!(err, "{line}").map_err(|e| OxaError::io("write output", &e))?;
         return Ok(1);
     }
-    let after = connect_all(&single, dirs, cwd, trusted);
+    let after = connect_all(&single, dirs, cwd, local);
     match after.first().map(|s| &s.state) {
         Some(ServerState::Connected) => {
             let n = after[0].tools.len();
@@ -724,6 +734,28 @@ mod tests {
         assert_eq!(code.unwrap(), 0);
         let (code, _, _) = run(&env, &["remove", "fs"]);
         assert_eq!(code.unwrap_err().code, codes::NOT_FOUND);
+    }
+
+    #[test]
+    fn project_login_rejects_changed_content() {
+        let env = TestEnv::new();
+        env.write(
+            "home/.oxa/agent/settings.json",
+            r#"{"projectTrustPolicy":"content"}"#,
+        );
+        env.write("work/.oxa/mcp.json", r#"{"mcpServers": {}}"#);
+        let (code, _, _) = run(&env, &["list"]);
+        assert_eq!(code.unwrap(), 0);
+        env.write(
+            "work/.oxa/mcp.json",
+            r#"{"mcpServers":{"new":{"url":"http://127.0.0.1:9/mcp","enabled":false}}}"#,
+        );
+        let (code, _, err) = run(&env, &["login", "new", "-l"]);
+        assert_eq!(code.unwrap(), 1);
+        assert!(
+            err.contains("changed or new since you approved") && err.contains("mcp.json"),
+            "{err}"
+        );
     }
 
     #[test]

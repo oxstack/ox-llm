@@ -74,6 +74,8 @@ pub struct HookInputs<'a> {
     pub resources: &'a Resources,
     pub sandbox: &'a Arc<dyn Sandbox>,
     pub trusted: bool,
+    /// The same permission-table override the session uses.
+    pub mode: Option<Mode>,
     /// This process is a subagent child (`OXA_SUBAGENT_DEPTH` / `OXA_SESSION_HINT`, see
     /// `child.rs`): `builtin:subagent` is not built (depth 1).
     pub nested: bool,
@@ -312,8 +314,7 @@ pub fn build_hooks(i: &HookInputs<'_>, notices: &mut Vec<(Level, String)>) -> Re
                 home: i.dirs.home.clone(),
                 trusted: i.trusted,
                 gate: configured_server_gate(
-                    i.args
-                        .permission_mode
+                    i.mode
                         .or_else(|| i.settings.string("oxa.mode").as_deref().and_then(Mode::parse))
                         .unwrap_or(Mode::Workspace),
                     i.cwd,
@@ -545,6 +546,7 @@ mod tests {
             resources,
             sandbox,
             trusted: false,
+            mode: args.permission_mode,
             nested: false,
             env,
             yolo: oxa_proto::YoloSwitch::new(oxa_proto::PermissionMode::Standard.autonomy()),

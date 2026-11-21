@@ -51,6 +51,11 @@ finally:
 
 fn terminal_loss(case: &str) {
     let env = TestEnv::new();
+    // The trust question is the owner's `ask` opt-in: the shipped default trusts the project
+    // without a dialog, so these cases name `ask` for the question to exist at all.
+    let mut settings = String::from(
+        r#"{"oxa":{"engine":{"inProcessCloud":false,"inProcessLocal":false}},"cacheWarming":"off","permissions":{"defaultMode":"yolo"},"retry":{"enabled":false}}"#,
+    );
     if case.starts_with("trust-") {
         std::fs::create_dir_all(env.work().join(".oxa")).unwrap();
         std::fs::write(
@@ -58,6 +63,7 @@ fn terminal_loss(case: &str) {
             "synthetic gated context",
         )
         .unwrap();
+        settings.insert_str(1, r#""defaultProjectTrust":"ask","#);
     }
     let turns = if case == "tool" {
         vec![ScriptTurn::tool(
@@ -69,11 +75,7 @@ fn terminal_loss(case: &str) {
         vec![ScriptTurn::text("unused")]
     };
     let server = FakeServer::start(turns, FakeOpts::default()).unwrap();
-    std::fs::write(
-        env.home().join(".oxa/agent/settings.json"),
-        r#"{"oxa":{"engine":{"inProcessCloud":false,"inProcessLocal":false}},"cacheWarming":"off","permissions":{"defaultMode":"yolo"},"retry":{"enabled":false}}"#,
-    )
-    .unwrap();
+    std::fs::write(env.home().join(".oxa/agent/settings.json"), settings).unwrap();
     let output = Command::new("python3")
         .args(["-I", "-c", PTY_CLOSE, env!("CARGO_BIN_EXE_oxa"), case])
         .current_dir(env.work())

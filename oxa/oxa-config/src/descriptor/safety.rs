@@ -45,9 +45,9 @@ pub(super) const ENTRIES: &[Descriptor] = &[
         Group::Safety,
         "Permissions",
         "New projects",
-        "Ask, always trust or never trust a project not seen before.",
+        "Trust a project not seen before, ask first, or never trust.",
     )
-    .key(Kind::Enum(&["ask", "always", "never"]), "\"ask\"")
+    .key(Kind::Enum(&["ask", "always", "never"]), "\"always\"")
     .choice(&[("ask", ""), ("always", ""), ("never", "")])
     .user_only()
     .apply(Apply::Reload)

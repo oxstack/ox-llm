@@ -115,9 +115,42 @@ fn print_exits_zero_when_done_checks_pass() {
     assert!(!err.contains(FAILED), "{err}");
 }
 
+/// A fresh install trusts its project (`defaultProjectTrust` ships as `always`): a one-line
+/// `oxa -p` in a clone runs the project's `done` checks and never fails on trust.
+#[test]
+fn fresh_default_runs_project_done_checks() {
+    let env = TestEnv::new();
+    project_done(&env, r#"["touch fresh-check-ran"]"#);
+    let (code, _, err) = go(&env, edits_then_stops(1), &["-p", "go"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!err.contains(NOTICE), "a fresh install asks nothing: {err}");
+    assert!(
+        env.work().join("fresh-check-ran").exists(),
+        "the project's done checks ran: {err}"
+    );
+}
+
+#[test]
+fn ask_opt_in_keeps_the_untrusted_done_refusal() {
+    let env = TestEnv::new();
+    env.write(
+        "home/.oxa/agent/settings.json",
+        r#"{"defaultProjectTrust": "ask"}"#,
+    );
+    project_done(&env, r#"["touch untrusted-check-ran"]"#);
+    let (code, _, err) = go(&env, edits_then_stops(1), &["-p", "go"]);
+    assert_eq!(code, 1, "{err}");
+    assert_eq!(err.matches(NOTICE).count(), 1, "{err}");
+    assert!(!env.work().join("untrusted-check-ran").exists());
+}
+
 #[test]
 fn untrusted_project_done_fails_with_an_owner_approval_route() {
     let env = TestEnv::new();
+    env.write(
+        "home/.oxa/agent/settings.json",
+        r#"{"defaultProjectTrust": "never"}"#,
+    );
     project_done(&env, r#"["touch untrusted-check-ran"]"#);
     for args in [["-p", "go"], ["--mode=json", "go"]] {
         let (code, _, err) = go(&env, edits_then_stops(1), &args);

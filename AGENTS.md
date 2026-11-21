@@ -457,7 +457,7 @@ read its result; they never launch builds or tests.
 - **Security severity is calibrated to a power tool** (owner 2026-11-21, `docs/threat-model.md` "Risk we accept").
   P0/P1 security is only the block list: a secret leaving the machine or reaching the model, logs or session files; a
   remote party (network, LAN guest, fork PR, provider stream) gaining code execution, credentials or spend; metered
-  money past a configured cap; an untrusted project changing user-only settings; data loss or an OS-breaking wipe
+  money past a configured cap; a project (trusted or not) changing user-only settings; data loss or an OS-breaking wipe
   under default settings; offline mode using the network. Everything else is P3 hardening at most and is filed as a
   follow-up: attacks that need code already running as the owner, shell obfuscation that only reaches what the mode
   allows anyway, anything in yolo beyond its two hard refusals, and theoretical chains. Do not ask for new refusals,
@@ -492,12 +492,18 @@ read its result; they never launch builds or tests.
   its surfaces and help (P1 if added outside it or without an exception reason).
 
 **Security invariants**
-- Project trust defaults to a saved folder decision, including the closest saved parent. Report new or
-  changed gated resources by path when loading them. `projectTrustPolicy: "content"` is user-only and
-  retains executable-content re-approval; loading changes under folder trust does not approve those
-  bytes for content policy or managed-worktree inheritance. Preserve explicit denials, safe paths and
-  the existing owner approval route. Trusted unattended checks run; untrusted checks report why and
-  how the owner can approve the source rather than silently skipping.
+- Project trust ships as `always` (owner decision 2026-11-21): a project is trusted without a question
+  and headless and worker runs do not fail on trust. `defaultProjectTrust: "ask"` and `"never"` are
+  owner opt-ins, the user layer only; a saved decision (the closest saved parent) and `--no-approve`
+  still win, and a user settings file that cannot be read fails safe to `never`. Report new or changed
+  gated resources by path when loading them. `projectTrustPolicy: "content"` is user-only and retains
+  executable-content re-approval, including when `always` admits the folder without a saved decision.
+  The content opt-in records the first snapshot; loading changes under folder trust does not approve
+  those bytes for content policy or managed-worktree inheritance. MCP startup still honors the session's
+  effective plan mode; project MCP sign-in checks the same project trust as listing. Preserve explicit denials, safe paths and the owner
+  approval route. Trusted unattended checks run; untrusted checks report why and how the owner can
+  approve the source rather than silently skipping. A finding that asks for the question to be the
+  default is answered here.
 - Never expose credentials, tokens or private data in prompts, errors, Debug, logs or tests; use synthetic fixtures.
   Do not open real credential files during review.
 - Keep engine transport selection, native binary/launch configuration, `allowRemote`, share authority, login/token

@@ -115,7 +115,7 @@ pi page(s): settings.md. Tests: `oxa-parity/tests/keys_settings.rs`.
 | SET-014 | `externalEditor` (then `$VISUAL`, `$EDITOR`) | P |  | `keys_settings.rs::set_014` |
 | SET-015 | `doubleEscapeAction` `tree\|fork\|none` | P |  | `keys_settings.rs::set_015` |
 | SET-016 | `treeFilterMode` (five values) | P |  | `keys_settings.rs::set_016` |
-| SET-017 | `defaultProjectTrust` `ask\|always\|never`; agent-directory settings only | P |  | `keys_settings.rs::set_017` |
+| SET-017 | `defaultProjectTrust` `ask\|always\|never`; agent-directory settings only | A | shipped default `always` (owner decision 2026-11-21); a fresh install trusts the project, `ask` and `never` are owner opt-ins, a project file value is ignored | `keys_settings.rs::set_017` |
 | SET-018 | `defaultTools`: plain names replace, `+name` adds, `-name` removes | A | default set is the 7 built-ins + `subagent` where O-146 offers it; `+name`/`-name` edit that set (incl. `subagent`); plain names replace it; resolved per epoch | `keys_settings.rs::set_018` |
 | SET-019 | `codemode.mode` `on\|only` | P |  | `keys_settings.rs::set_019` |
 | SET-021 | `sessionDir` | A | the session store keeps one sub-directory per working directory below every sessions directory (pi stores flat in a custom `sessionDir`) | `keys_settings.rs::set_021` |
@@ -569,8 +569,8 @@ pi page(s): security.md, containerization.md. Tests: `oxa-parity/tests/resources
 
 | id | behaviour | V | note (invariant or reason) | test |
 |---|---|---|---|---|
-| SEC-001 | Trust prompt for project-local resources on first run in a directory | A | oxa is stricter: trust approves content (sha256 of the project files that run or load code); a changed file asks again (interactive) or is not loaded with a notice (headless) until approved or `--approve` | `resources.rs::sec_001` |
-| SEC-002 | Trust-gated resources: project settings, extensions, skills, prompts, themes, `mcp.json`, context files as pi lists them | P |  | `resources.rs::sec_002` |
+| SEC-001 | Trust prompt for project-local resources on first run in a directory | A | oxa trusts the project by default (no prompt, owner decision 2026-11-21); `ask` asks once in the interface, `ask`/`never` skip in headless runs; trust approves content (sha256 of the project files that run or load code), so a changed file asks again (interactive) or is not loaded with a notice (headless) until approved or `--approve` | `resources.rs::sec_001` |
+| SEC-002 | Trust-gated resources: project settings, extensions, skills, prompts, themes, `mcp.json`, context files as pi lists them | A | the rows are what `defaultProjectTrust: "never"` (owner opt-in) hides; a fresh install loads them without a question (owner decision 2026-11-21) | `resources.rs::sec_002` |
 | SEC-003 | Decision order: flag > extension (`project_trust`) > saved (closest parent) > `defaultProjectTrust` | P |  | `resources.rs::sec_003` |
 | SEC-004 | Non-interactive `ask` skips trust-gated resources | P |  | `resources.rs::sec_004` |
 | SEC-005 | `/trust` saves a decision; `trust.json` | P |  | `resources.rs::sec_005` |

@@ -235,6 +235,11 @@ fn a_rows_name_their_invariant() {
 #[test]
 fn mcp_001() {
     let env = TestEnv::new();
+    // The `untrusted` runs below name the owner's opt-in: the shipped default trusts the project.
+    write_json(
+        &env.agent_dir().join("settings.json"),
+        &json!({"defaultProjectTrust": "never"}),
+    );
     write_json(
         &user_file(&env),
         &json!({"mcpServers": {

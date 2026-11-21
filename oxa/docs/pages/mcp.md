@@ -73,7 +73,7 @@ Servers connect in the background when oxa starts. The first prompt waits up to 
 
 Before oxa starts or connects to a server, the permission gate is asked: an `Exec` for a stdio server and a `Net` for an HTTP server ([security.md](security.md#permission-modes)). A server that the gate refuses shows as denied. In offline mode HTTP servers are refused. A stdio server is started through `bubblewrap` with the network unshared, and it is refused when `bubblewrap` cannot be used. Its file access is not limited: see [security.md](security.md#offline-mode).
 
-A server that answers with an authentication challenge and has no usable token shows as needing sign-in. Run `oxa mcp login <name>` to sign in.
+Plan mode denies MCP startup even when the project is trusted. A server that answers with an authentication challenge and has no usable token shows as needing sign-in. Run `oxa mcp login <name>` to sign in. `oxa mcp login <name> -l` checks project trust and any content changes before connecting.
 
 The HTTP client uses the `httpProxy` setting, or `HTTP_PROXY` and `HTTPS_PROXY`, when those are set.
 

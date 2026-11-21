@@ -2,7 +2,10 @@
 //! Isolation: use `oxa_fake::TestEnv` for every file and directory; never touch the real home.
 
 use oxa_fake::TestEnv;
-use oxa_perm::{gated_resources, resolve_trust, DefaultTrust, TrustInputs, TrustOutcome, TrustStore};
+use oxa_perm::{
+    gated_resources, resolve_trust, saved_trust, DefaultTrust, TrustInputs, TrustOutcome, TrustStore,
+    SHIPPED_DEFAULT_TRUST,
+};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -77,6 +80,54 @@ fn flag_beats_extension_beats_saved_beats_default() {
         ..inputs(DefaultTrust::Ask)
     };
     assert_eq!(resolve_trust(&ask_saved), TrustOutcome::Trusted);
+}
+
+/// Owner decision 2026-11-21: a fresh install trusts the project; `ask` and `never` are opt-ins.
+#[test]
+fn shipped_default_trusts_and_the_owner_opts_out() {
+    assert_eq!(SHIPPED_DEFAULT_TRUST, DefaultTrust::Trust);
+    assert_eq!(DefaultTrust::from_setting(None), DefaultTrust::Trust);
+    for (value, want) in [
+        ("always", DefaultTrust::Trust),
+        ("ask", DefaultTrust::Ask),
+        ("never", DefaultTrust::Untrusted),
+        ("Ask", SHIPPED_DEFAULT_TRUST),
+        ("", SHIPPED_DEFAULT_TRUST),
+    ] {
+        assert_eq!(DefaultTrust::from_setting(Some(value)), want, "{value:?}");
+    }
+    // A fresh project with gated resources loads them without a question and saves nothing.
+    let env = TestEnv::new();
+    let work = env.work();
+    std::fs::create_dir_all(work.join(".oxa/skills/one")).expect("mkdir");
+    let mut store = TrustStore::load(&env.agent_dir().join("trust.json"));
+    assert_eq!(
+        saved_trust(&store, &work, SHIPPED_DEFAULT_TRUST),
+        TrustOutcome::Trusted
+    );
+    // The opt-ins keep the old answer, the closest saved decision wins over both, and a saved
+    // denial still blocks the shipped default.
+    assert_eq!(
+        saved_trust(&store, &work, DefaultTrust::Ask),
+        TrustOutcome::Untrusted
+    );
+    assert_eq!(
+        saved_trust(&store, &work, DefaultTrust::Untrusted),
+        TrustOutcome::Untrusted
+    );
+    let file = env.agent_dir().join("trust.json");
+    store
+        .save(&file, work.parent().unwrap(), true)
+        .expect("save parent yes");
+    assert_eq!(
+        saved_trust(&store, &work, DefaultTrust::Untrusted),
+        TrustOutcome::Trusted
+    );
+    store.save(&file, &work, false).expect("save denial");
+    assert_eq!(
+        saved_trust(&store, &work, SHIPPED_DEFAULT_TRUST),
+        TrustOutcome::Untrusted
+    );
 }
 
 /// saved decisions

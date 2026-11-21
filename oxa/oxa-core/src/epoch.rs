@@ -5,7 +5,7 @@ use crate::prefix::{build_prefix_with, PrefixOpts};
 use crate::toolset::{resolve_toolset, ToolSelection, Toolset};
 use crate::SessionState;
 use oxa_config::Settings;
-use oxa_perm::{gated_resources, resolve_trust, DefaultTrust, TrustInputs, TrustOutcome, TrustStore};
+use oxa_perm::{saved_trust, DefaultTrust, TrustOutcome, TrustStore};
 use oxa_proto::{
     codes, AgentEvent, Entry, EntryBody, EventSink, FrozenPrefix, HookPoint, Level, OxaError, Source, Tool,
     ToolSpec, Ui, Value,
@@ -265,20 +265,35 @@ fn project_trusted(st: &SessionState, sink: &mut dyn EventSink) -> bool {
     if st.settings.files().is_some_and(|files| !files.allows_project()) {
         return false;
     }
-    let store = TrustStore::load(&st.dirs.trust_file());
-    let inputs = TrustInputs {
-        flag: None,
-        extension: None,
-        saved: store.lookup(&st.cwd),
-        default: DefaultTrust::Ask,
-        interactive: false,
-        has_gated: !gated_resources(&st.cwd).is_empty(),
-    };
-    if resolve_trust(&inputs) != TrustOutcome::Trusted {
+    let owner = Settings::load(&st.dirs, &st.cwd, false);
+    let trust_file = st.dirs.trust_file();
+    let mut store = TrustStore::load(&trust_file);
+    let outcome = saved_trust(
+        &store,
+        &st.cwd,
+        DefaultTrust::from_setting(owner.project_trust_default()),
+    );
+    if outcome != TrustOutcome::Trusted {
         return false;
     }
-    if Settings::load(&st.dirs, &st.cwd, false).project_trust_requires_content() {
-        return !matches!(store.approval(&st.cwd), oxa_perm::Approval::Changed(_));
+    if owner.project_trust_requires_content() {
+        let text = match store.check_content(&trust_file, &st.cwd) {
+            Ok(oxa_perm::Approval::Matches | oxa_perm::Approval::NoRecord) => return true,
+            Ok(oxa_perm::Approval::Changed(changed)) => format!(
+                "Project config not loaded: {}. Restart and approve the changes to load it.",
+                changed
+                    .iter()
+                    .map(|ch| ch.path_line())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Err(err) => err.message,
+        };
+        sink.emit(&AgentEvent::Notice {
+            level: Level::Warning,
+            text,
+        });
+        return false;
     }
     if let Some(text) = store.folder_changes_notice(&st.cwd) {
         sink.emit(&AgentEvent::Notice {

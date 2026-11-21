@@ -8,12 +8,30 @@ use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+/// The shipped `defaultProjectTrust` (owner decision 2026-11-21): a project is trusted unless
+/// the owner asks for the question (`ask`) or refuses projects (`never`), or a saved decision
+/// says otherwise.
+pub const SHIPPED_DEFAULT_TRUST: DefaultTrust = DefaultTrust::Trust;
+
 /// pi's `defaultProjectTrust`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DefaultTrust {
     Ask,
     Trust,
     Untrusted,
+}
+
+impl DefaultTrust {
+    /// The decision [`SHIPPED_DEFAULT_TRUST`] and the owner's own value select. A missing,
+    /// unknown or wrongly typed value takes the shipped default.
+    pub fn from_setting(value: Option<&str>) -> DefaultTrust {
+        match value {
+            Some("always") => DefaultTrust::Trust,
+            Some("never") => DefaultTrust::Untrusted,
+            Some("ask") => DefaultTrust::Ask,
+            _ => SHIPPED_DEFAULT_TRUST,
+        }
+    }
 }
 
 /// `trust.json`: saved decisions per directory, plus (B4, oxa only) the content hashes of the
@@ -123,6 +141,18 @@ impl TrustStore {
             Approval::Matches
         } else {
             Approval::Changed(changed)
+        }
+    }
+
+    /// Apply the content policy after the caller has admitted the folder. Record its first
+    /// snapshot without saving a folder decision; later reads must compare to that snapshot.
+    pub fn check_content(&mut self, file: &Path, cwd: &Path) -> Result<Approval, OxaError> {
+        match self.approval(cwd) {
+            Approval::NoRecord => {
+                self.record_baseline(file, cwd)?;
+                Ok(self.approval(cwd))
+            }
+            approval => Ok(approval),
         }
     }
 
@@ -666,6 +696,20 @@ pub fn resolve_trust(i: &TrustInputs) -> TrustOutcome {
     }
 }
 
+/// The decision of the saved store and `defaultProjectTrust` alone, with no flag, extension
+/// answer or prompt: what `/reload`, `oxa work` and the small subcommands that read project
+/// resources use, so the shipped default decides them exactly as it decides a start.
+pub fn saved_trust(store: &TrustStore, cwd: &Path, default: DefaultTrust) -> TrustOutcome {
+    resolve_trust(&TrustInputs {
+        flag: None,
+        extension: None,
+        saved: store.lookup(cwd),
+        default,
+        interactive: false,
+        has_gated: !gated_resources(cwd).is_empty(),
+    })
+}
+
 /// The trust-gated resources present in the project at `cwd`, as display paths in a fixed
 /// order: project settings, extensions, skills, prompt templates, themes, `mcp.json`,
 /// `SYSTEM.md` / `APPEND_SYSTEM.md`, exec hooks (pi's gated list; context files `AGENTS.md`
@@ -709,8 +753,22 @@ fn present(out: &mut Vec<String>, path: &Path) {
     }
 }
 
-/// `settings.json` declares at least one exec hook (`hooks: {event: command}`).
+/// The largest `settings.json` this check opens. A settings file is small; anything larger is
+/// not read before the trust decision.
+const MAX_HOOKS_SETTINGS_BYTES: u64 = 1024 * 1024;
+
+/// `settings.json` declares at least one exec hook (`hooks: {event: command}`). Only a regular
+/// file is opened: a link, FIFO or device keeps its presence entry (`gated_resources`) but is
+/// never read, and neither is a file over [`MAX_HOOKS_SETTINGS_BYTES`]. The project-resource
+/// decision before a settings read ([`saved_trust`]) runs this first, so neither a reporting-only
+/// listing nor an untrusted start blocks on a FIFO, follows a link or allocates a large file.
 fn has_exec_hooks(settings: &Path) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(settings) else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() > MAX_HOOKS_SETTINGS_BYTES {
+        return false;
+    }
     let Ok(text) = std::fs::read_to_string(settings) else {
         return false;
     };
